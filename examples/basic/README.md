@@ -1,6 +1,6 @@
 # Luke Voice Chat Example
 
-A complete example application demonstrating `@luke/server` and `@luke/client` integration.
+A complete example application demonstrating `@leia-org/luke-server` and `@leia-org/luke-client` integration.
 
 ## Structure
 

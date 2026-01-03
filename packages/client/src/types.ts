@@ -1,4 +1,4 @@
-// Types for @luke/client
+// Types for @leia-org/luke-client
 // Shared types between client components and hooks
 
 // Provider info received from server handshake

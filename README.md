@@ -13,13 +13,13 @@ A TypeScript library that unifies OpenAI Realtime API and Gemini Live API, provi
 
 ## Packages
 
-- **[@luke/client](./packages/client)**: React hooks and components for the frontend.
-- **[@luke/server](./packages/server)**: Node.js WebSocket server and provider orchestration.
+- **[@leia-org/luke-client](./packages/client)**: React hooks and components for the frontend.
+- **[@leia-org/luke-server](./packages/server)**: Node.js WebSocket server and provider orchestration.
 
 ## Installation
 
 ```bash
-pnpm add @luke/server @luke/client
+pnpm add @leia-org/luke-server @leia-org/luke-client
 ```
 
 ## Development
@@ -45,7 +45,7 @@ To work on this repository:
 ## Server Usage
 
 ```typescript
-import { createLukeServer, openai, gemini, z } from '@luke/server';
+import { createLukeServer, openai, gemini, z } from '@leia-org/luke-server';
 
 const server = createLukeServer({
   providers: [
@@ -86,7 +86,7 @@ server.listen(3001);
 ## Client Usage
 
 ```tsx
-import { LukeProvider, useLukeContext, AudioControls, TranscriptionDisplay } from '@luke/client';
+import { LukeProvider, useLukeContext, AudioControls, TranscriptionDisplay } from '@leia-org/luke-client';
 
 function App() {
   return (
@@ -117,7 +117,7 @@ function VoiceChat() {
 
 ```
 ┌─────────────────┐     WebSocket      ┌──────────────────┐
-│  @luke/client   │◄──────────────────►│   @luke/server   │
+│ @leia-org/client│◄──────────────────►│ @leia-org/server │
 │                 │                    │                  │
 │  - LukeProvider │                    │  - Auth          │
 │  - useLuke hook │                    │  - Sessions      │

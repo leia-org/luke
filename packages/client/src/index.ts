@@ -1,4 +1,4 @@
-// @luke/client - React client for realtime AI voice communication
+// @leia-org/luke-client - React client for realtime AI voice communication
 // Main entry point and public exports
 
 // Components

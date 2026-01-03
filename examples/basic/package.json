@@ -11,8 +11,8 @@
         "preview": "vite preview"
     },
     "dependencies": {
-        "@luke/client": "workspace:*",
-        "@luke/server": "workspace:*",
+        "@leia-org/luke-client": "workspace:*",
+        "@leia-org/luke-server": "workspace:*",
         "cors": "^2.8.5",
         "dotenv": "^16.6.1",
         "express": "^4.21.2",

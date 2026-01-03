@@ -1,4 +1,4 @@
-# @luke/client
+# @leia-org/luke-client
 
 React client library for the Luke realtime AI voice communication platform.
 
@@ -12,7 +12,7 @@ React client library for the Luke realtime AI voice communication platform.
 ## Installation
 
 ```bash
-pnpm add @luke/client
+pnpm add @leia-org/luke-client
 ```
 
 ## Usage
@@ -20,7 +20,7 @@ pnpm add @luke/client
 Wrap your application (or the part that needs voice features) with `LukeProvider`.
 
 ```tsx
-import { LukeProvider, useLukeContext, AudioControls, TranscriptionDisplay } from '@luke/client';
+import { LukeProvider, useLukeContext, AudioControls, TranscriptionDisplay } from '@leia-org/luke-client';
 
 function App() {
   const token = "your_auth_token_here";

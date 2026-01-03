@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { LukeProvider, VoiceClientUI } from '@luke/client';
+import { LukeProvider, VoiceClientUI } from '@leia-org/luke-client';
 import Login from './components/Login';
 import './App.css';
 

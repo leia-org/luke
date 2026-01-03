@@ -1,4 +1,4 @@
-# @luke/server
+# @leia-org/luke-server
 
 The server-side component of the Luke library, responsible for managing WebSocket connections, authentication, and orchestrating communication with AI providers (OpenAI Realtime, Gemini Live).
 
@@ -12,13 +12,13 @@ The server-side component of the Luke library, responsible for managing WebSocke
 ## Installation
 
 ```bash
-pnpm add @luke/server
+pnpm add @leia-org/luke-server
 ```
 
 ## Usage
 
 ```typescript
-import { createLukeServer, openai, gemini } from '@luke/server';
+import { createLukeServer, openai, gemini } from '@leia-org/luke-server';
 
 const server = createLukeServer({
   providers: [

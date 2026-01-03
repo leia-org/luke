@@ -1,10 +1,10 @@
-// Express server with @luke/server integration
+// Express server with @leia-org/luke-server integration
 // Runs the Luke WebSocket server alongside a REST API
 
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import { createLukeServer, openai, gemini, z } from '@luke/server';
+import { createLukeServer, openai, gemini, z } from '@leia-org/luke-server';
 
 const app = express();
 app.use(cors());
