@@ -42,6 +42,10 @@ function getAvailableProviders(): string[] {
     return providers;
 }
 
+// In-memory history storage for demo purposes
+// In production, use a real database (Postgres, MongoDB, etc.)
+const historyStore = new Map<string, any[]>();
+
 // Create Luke server with configured providers
 const lukeServer = createLukeServer({
     providers: [
@@ -92,6 +96,32 @@ const lukeServer = createLukeServer({
         onEnd: async (session, reason) => {
             console.log(`[Session] Ended: ${session.id} - ${reason}`);
         },
+        // Implement history hooks
+        getHistory: async (session) => {
+            // Load history for this user
+            // In a real app, you might scope this by session ID or retain it per user
+            return historyStore.get(session.userId) || [];
+        },
+        saveHistory: async (session, transcription) => {
+            // Save history for this user
+            const current = historyStore.get(session.userId) || [];
+            current.push(transcription);
+            historyStore.set(session.userId, current);
+            console.log(`[Persistence] Saved message for ${session.userId} (Encrypted: ${transcription.text.includes(':')})`);
+        }
+    },
+
+    // Enable encryption (optional)
+    security: {
+        // Hardcoded key for demo (32 bytes hex)
+        // In production, use a secure env variable
+        encryptionKey: process.env.ENCRYPTION_KEY || '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f'
+    },
+
+    recording: {
+        enabled: true,
+        directory: './recordings',
+        filenameTemplate: 'demo_{id}_X_N',
     },
 
     config: {

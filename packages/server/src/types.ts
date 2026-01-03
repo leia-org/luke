@@ -84,12 +84,22 @@ export interface SessionConfig<TSession = unknown, TUser = unknown> {
     resolve?: (req: IncomingMessage, user: TUser) => Promise<TSession | null>;
     create?: (user: TUser, provider: LukeProvider) => Promise<TSession>;
     onEnd?: (session: TSession, reason: 'disconnect' | 'error' | 'timeout') => Promise<void>;
+    getHistory?: (session: TSession) => Promise<Transcription[]>;
+    saveHistory?: (session: TSession, transcription: Transcription) => Promise<void>;
 }
 
 // Server configuration passed to createLukeServer
 export interface LukeServerConfig<TUser = unknown, TSession = unknown> {
     providers: LukeProvider[];
     auth: AuthConfig<TUser>;
+    security?: {
+        encryptionKey?: string;
+    };
+    recording?: {
+        enabled: boolean;
+        directory: string;
+        filenameTemplate?: string;
+    };
     session?: SessionConfig<TSession, TUser>;
     config?: Partial<ProviderSessionConfig>;
     onConnect?: (session: LukeSession<TSession>, user: TUser) => void;
@@ -130,6 +140,7 @@ export type ClientMessage =
 export type ServerMessage =
     | HandshakeMessage
     | { type: 'session_ready'; sessionId: string; sampleRate: number }
+    | { type: 'history'; messages: Transcription[] }
     | { type: 'audio'; data: ArrayBuffer }
     | { type: 'transcription'; role: 'user' | 'assistant'; text: string; final: boolean }
     | { type: 'turn_complete' }

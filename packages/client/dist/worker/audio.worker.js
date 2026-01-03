@@ -3,14 +3,17 @@
 import { floatTo16BitPCM, pcm16ToFloat32, resampleAudio, calculateAudioLevel } from './audio-utils.js';
 // Target sample rate (set by server based on provider)
 let targetSampleRate = 16000;
-// Browser audio context typically runs at 44100 or 48000 Hz
-const BROWSER_SAMPLE_RATE = 48000;
+// Browser audio context sample rate (configured by main thread)
+let sourceSampleRate = 48000;
 // Handle incoming messages
 self.onmessage = (event) => {
     const message = event.data;
     switch (message.type) {
         case 'configure':
             targetSampleRate = message.sampleRate;
+            if (message.sourceSampleRate) {
+                sourceSampleRate = message.sourceSampleRate;
+            }
             break;
         case 'encode':
             encodeAudio(message.samples);
@@ -22,8 +25,8 @@ self.onmessage = (event) => {
 };
 // Encode Float32 audio from browser to PCM for server
 function encodeAudio(samples) {
-    // Resample to target rate
-    const resampled = resampleAudio(samples, BROWSER_SAMPLE_RATE, targetSampleRate);
+    // Resample to target rate using actual source rate
+    const resampled = resampleAudio(samples, sourceSampleRate, targetSampleRate);
     // Calculate audio level before encoding
     const level = calculateAudioLevel(resampled);
     // Convert to 16-bit PCM
@@ -46,7 +49,7 @@ function decodeAudio(pcmData) {
     // Convert to Float32
     const float32 = pcm16ToFloat32(pcm);
     // Resample from server rate (24kHz output) to browser rate
-    const resampled = resampleAudio(float32, 24000, BROWSER_SAMPLE_RATE);
+    const resampled = resampleAudio(float32, 24000, sourceSampleRate);
     // Create copy of samples to ensure clean transfer
     const result = new Float32Array(resampled.length);
     result.set(resampled);

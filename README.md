@@ -9,6 +9,7 @@ A TypeScript library that unifies OpenAI Realtime API and Gemini Live API, provi
 - **Flexible authentication** - JWT + custom validation callbacks
 - **Multi-session handling** - Server manages concurrent sessions
 - **Session mapping** - Link AI sessions to your database sessions
+- **Robust Audio Recording** - Hybrid MP3/WAV recording with silence removal & voice activity detection
 - **React components** - Ready-to-use `LukeProvider`, `AudioControls`, `TranscriptionDisplay`
 
 ## Packages

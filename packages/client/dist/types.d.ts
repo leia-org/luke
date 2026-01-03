@@ -23,6 +23,11 @@ export interface UseLukeConfig {
     onError?: (error: Error) => void;
     onConnect?: () => void;
     onDisconnect?: () => void;
+    reconnect?: boolean;
+    reconnectInterval?: number;
+    maxReconnectAttempts?: number;
+    persistence?: boolean;
+    persistenceKey?: string;
 }
 export interface UseLukeReturn {
     connectionState: ConnectionState;
@@ -49,6 +54,8 @@ export interface LukeProviderProps {
     serverUrl: string;
     authToken?: string;
     autoConnect?: boolean;
+    persistence?: boolean;
+    persistenceKey?: string;
     children: React.ReactNode;
 }
 export type ServerMessage = {
@@ -59,6 +66,9 @@ export type ServerMessage = {
     type: 'session_ready';
     sessionId: string;
     sampleRate: number;
+} | {
+    type: 'history';
+    messages: TranscriptionMessage[];
 } | {
     type: 'transcription';
     role: 'user' | 'assistant';

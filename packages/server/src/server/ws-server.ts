@@ -3,7 +3,9 @@
 
 import { createServer, type Server as HttpServer, type IncomingMessage } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
+import * as crypto from 'crypto';
 import { authenticate } from './auth.js';
+import { SessionRecorder } from './recorder.js';
 import type {
     LukeServerConfig,
     LukeSession,
@@ -51,6 +53,27 @@ export function createLukeServer<TUser, TSession>(
         }
     });
 
+    // Encryption helpers
+    const encryptString = (text: string, key: string): string => {
+        const iv = crypto.randomBytes(12);
+        const cipher = crypto.createCipheriv('aes-256-gcm', Buffer.from(key, 'hex'), iv);
+        let encrypted = cipher.update(text, 'utf8', 'hex');
+        encrypted += cipher.final('hex');
+        const authTag = cipher.getAuthTag();
+        return `${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted}`;
+    };
+
+    const decryptString = (text: string, key: string): string => {
+        const [ivHex, authTagHex, encryptedHex] = text.split(':');
+        const iv = Buffer.from(ivHex, 'hex');
+        const authTag = Buffer.from(authTagHex, 'hex');
+        const decipher = crypto.createDecipheriv('aes-256-gcm', Buffer.from(key, 'hex'), iv);
+        decipher.setAuthTag(authTag);
+        let decrypted = decipher.update(encryptedHex, 'hex', 'utf8');
+        decrypted += decipher.final('utf8');
+        return decrypted;
+    };
+
     wss.on('connection', async (ws: WebSocket, req: IncomingMessage, user: TUser) => {
 
         // Send handshake with available providers
@@ -67,7 +90,9 @@ export function createLukeServer<TUser, TSession>(
         ws.send(JSON.stringify(handshake));
 
         // Initialize session state
-        const session: LukeSession<TSession> = {
+
+        // Initialize session state
+        const session: LukeSession<TSession> & { recorder?: SessionRecorder } = {
             id: generateSessionId(),
             providerId: '',
             providerConnection: null,
@@ -75,6 +100,16 @@ export function createLukeServer<TUser, TSession>(
             createdAt: new Date(),
         };
         sessions.set(ws, session);
+
+        // Initialize recorder if enabled
+        if (config.recording?.enabled) {
+            session.recorder = new SessionRecorder(
+                session.id,
+                config.recording.directory,
+                config.recording.filenameTemplate
+            );
+            session.recorder.start();
+        }
 
         // Handle incoming messages
         ws.on('message', async (data) => {
@@ -144,6 +179,24 @@ export function createLukeServer<TUser, TSession>(
                 break;
 
             case 'audio':
+                // Record user audio
+                // Use provider's sample rate if available (client sends what provider requested)
+                // Default to 16000 if no provider selected yet
+                if ((session as any).recorder) {
+                    let inputRate = 16000;
+                    if (session.providerId) {
+                        const provider = config.providers.find(p => p.id === session.providerId);
+                        if (provider) {
+                            inputRate = provider.sampleRate;
+                        }
+                    }
+                    // Ensure we slice the buffer correctly to avoid garbage
+                    const audioBuffer = Buffer.from(message.data);
+                    // Double check if message.data is ArrayBuffer, duplicate it to ensure clean memory
+                    // (Buffer.from(arrayBuffer) usually does a copy but let's be safe)
+                    (session as any).recorder.writeAudio(audioBuffer, inputRate);
+                }
+
                 if (session.providerConnection) {
                     session.providerConnection.send({
                         type: 'audio',
@@ -232,6 +285,34 @@ export function createLukeServer<TUser, TSession>(
             };
             ws.send(JSON.stringify(readyMsg));
 
+            // Load and send history if available
+            if (config.session?.getHistory && session.userSession) {
+                try {
+                    const history = await config.session.getHistory(session.userSession);
+                    if (history && history.length > 0) {
+                        // Decrypt if needed
+                        const processedHistory = history.map(msg => {
+                            if (config.security?.encryptionKey) {
+                                try {
+                                    return { ...msg, text: decryptString(msg.text, config.security.encryptionKey) };
+                                } catch (e) {
+                                    console.error('Failed to decrypt message:', e);
+                                    return { ...msg, text: '[Encrypted Message]' };
+                                }
+                            }
+                            return msg;
+                        });
+
+                        ws.send(JSON.stringify({
+                            type: 'history',
+                            messages: processedHistory
+                        }));
+                    }
+                } catch (err) {
+                    console.error('Failed to load history:', err);
+                }
+            }
+
             // Trigger onConnect callback
             config.onConnect?.(session, user);
         } catch (err) {
@@ -247,6 +328,13 @@ export function createLukeServer<TUser, TSession>(
     ): void {
         connection.onAudio((audio) => {
             if (ws.readyState === WebSocket.OPEN) {
+                // Record assistant audio (usually 24kHz)
+                if ((session as any).recorder) {
+                    // Safe buffer creation with offset/length
+                    const audioBuffer = Buffer.from(audio.buffer, audio.byteOffset, audio.byteLength);
+                    (session as any).recorder.writeAudio(audioBuffer, 24000);
+                }
+
                 // Send audio as binary frame
                 ws.send(audio);
             }
@@ -265,6 +353,21 @@ export function createLukeServer<TUser, TSession>(
 
             // Call transcription callback
             config.onTranscription?.(transcription, session);
+
+            // Save history (only final messages)
+            if (config.session?.saveHistory && session.userSession && transcription.final) {
+                // Encrypt if needed
+                let msgToSave = transcription;
+                if (config.security?.encryptionKey) {
+                    msgToSave = {
+                        ...transcription,
+                        text: encryptString(transcription.text, config.security.encryptionKey)
+                    };
+                }
+                config.session.saveHistory(session.userSession, msgToSave).catch(err => {
+                    console.error('Failed to save history:', err);
+                });
+            }
         });
 
         connection.onTurnComplete(() => {
@@ -304,6 +407,11 @@ export function createLukeServer<TUser, TSession>(
         }
 
         config.onDisconnect?.(session, user);
+
+        // Stop recorder
+        if ((session as any).recorder) {
+            (session as any).recorder.stop();
+        }
 
         sessions.delete(ws);
         users.delete(ws);

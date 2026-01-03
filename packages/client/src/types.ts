@@ -34,6 +34,11 @@ export interface UseLukeConfig {
     onError?: (error: Error) => void;
     onConnect?: () => void;
     onDisconnect?: () => void;
+    reconnect?: boolean;
+    reconnectInterval?: number;
+    maxReconnectAttempts?: number;
+    persistence?: boolean;
+    persistenceKey?: string;
 }
 
 // Return type of useLuke hook
@@ -75,6 +80,8 @@ export interface LukeProviderProps {
     serverUrl: string;
     authToken?: string;
     autoConnect?: boolean;
+    persistence?: boolean;
+    persistenceKey?: string;
     children: React.ReactNode;
 }
 
@@ -82,6 +89,7 @@ export interface LukeProviderProps {
 export type ServerMessage =
     | { type: 'handshake'; providers: ProviderInfo[]; defaultProvider?: string }
     | { type: 'session_ready'; sessionId: string; sampleRate: number }
+    | { type: 'history'; messages: TranscriptionMessage[] }
     | { type: 'transcription'; role: 'user' | 'assistant'; text: string; final: boolean }
     | { type: 'turn_complete' }
     | { type: 'interrupted' }

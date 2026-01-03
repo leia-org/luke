@@ -8,6 +8,7 @@ The server-side component of the Luke library, responsible for managing WebSocke
 - **WebSocket Server**: Handles real-time audio and text streaming.
 - **Authentication**: Built-in support for JWT and custom validation.
 - **Session Management**: persistent sessions and database integration hooks.
+- **Hybrid Recording**: Records sessions in MP3 (if ffmpeg available) or WAV, with automatic silence trimming.
 
 ## Installation
 
@@ -28,10 +29,26 @@ const server = createLukeServer({
   // ... configuration
 });
 
-server.listen(3001, () => {
   console.log('Luke server running on port 3001');
 });
 ```
+
+## Recording Configuration
+
+Luke can automatically record sessions. It prioritizes **MP3** (via `ffmpeg`) for storage efficiency but falls back to **WAV** if `ffmpeg` is not found.
+
+```typescript
+const server = createLukeServer({
+  // ...
+  recording: {
+    enabled: true,
+    directory: './recordings',
+    // Supported variables: {id}, {timestamp}, X (random char), N (random number)
+    filenameTemplate: 'session_{id}_{timestamp}', 
+  }
+});
+```
+*Note: MP3 recording requires `ffmpeg` to be installed and available in the system PATH. It automatically applies filters to remove long periods of silence (>1s) and normalizes audio rate to 24kHz.*
 
 ## Configuration
 

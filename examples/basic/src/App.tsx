@@ -54,7 +54,13 @@ function App() {
     }
 
     return (
-        <LukeProvider serverUrl="ws://localhost:3001" authToken={token}>
+        <LukeProvider
+            serverUrl="ws://localhost:3001"
+            authToken={token}
+            // Enable client-side local storage backup
+            // Server-side history is automatically handled if sent by server
+            persistence={true}
+        >
             <div className="demo-dashboard" style={{
                 height: '100vh',
                 background: '#f0f2f5',

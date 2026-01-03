@@ -6,11 +6,13 @@ import { useLuke } from '../hooks/useLuke.js';
 // Context for Luke state
 const LukeContext = createContext(null);
 // Provider component wraps children with Luke context
-export function LukeProvider({ serverUrl, authToken, autoConnect = false, children, }) {
+export function LukeProvider({ serverUrl, authToken, autoConnect = false, persistence, persistenceKey, children, }) {
     const luke = useLuke({
         serverUrl,
         authToken,
         autoConnect,
+        persistence,
+        persistenceKey,
     });
     return (_jsx(LukeContext.Provider, { value: luke, children: children }));
 }

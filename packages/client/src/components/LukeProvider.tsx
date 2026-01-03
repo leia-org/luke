@@ -13,12 +13,16 @@ export function LukeProvider({
     serverUrl,
     authToken,
     autoConnect = false,
+    persistence,
+    persistenceKey,
     children,
 }: LukeProviderProps): React.ReactElement {
     const luke = useLuke({
         serverUrl,
         authToken,
         autoConnect,
+        persistence,
+        persistenceKey,
     });
 
     return (

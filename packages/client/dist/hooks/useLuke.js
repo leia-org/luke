@@ -16,13 +16,31 @@ export function useLuke(config) {
     const [isRecording, setIsRecording] = useState(false);
     const [audioLevel, setAudioLevel] = useState(0);
     // Transcription state
-    const [transcription, setTranscription] = useState([]);
+    const [transcription, setTranscription] = useState(() => {
+        // Only load from localStorage if explicitly enabled (client-side persistence)
+        if (config.persistence) {
+            const key = config.persistenceKey || 'luke_transcription';
+            try {
+                const stored = sessionStorage.getItem(key);
+                return stored ? JSON.parse(stored) : [];
+            }
+            catch {
+                return [];
+            }
+        }
+        return [];
+    });
     // Refs for WebSocket and audio
     const wsRef = useRef(null);
     const audioContextRef = useRef(null);
     const mediaStreamRef = useRef(null);
     const workletNodeRef = useRef(null);
+    const workerRef = useRef(null);
     const isRecordingRef = useRef(false);
+    // Reconnection state
+    const isIntentionalDisconnect = useRef(false);
+    const reconnectAttempts = useRef(0);
+    const reconnectTimeout = useRef(undefined);
     // Playback queue for received audio
     const playbackQueueRef = useRef([]);
     const isPlayingRef = useRef(false);
@@ -123,6 +141,16 @@ export function useLuke(config) {
                     // Clear playback queue on interruption
                     playbackQueueRef.current = [];
                     break;
+                case 'history':
+                    // Always accept history from server if sent
+                    if (message.messages) {
+                        setTranscription((prev) => {
+                            // Replace current state with server history
+                            // (Ideally we might want to merge, but usually history is authoritative on connect)
+                            return message.messages;
+                        });
+                    }
+                    break;
                 case 'error':
                     const err = new Error(`${message.code}: ${message.message}`);
                     setError(err);
@@ -144,6 +172,11 @@ export function useLuke(config) {
     const connect = useCallback(() => {
         if (wsRef.current)
             return;
+        isIntentionalDisconnect.current = false;
+        if (reconnectTimeout.current) {
+            clearTimeout(reconnectTimeout.current);
+            reconnectTimeout.current = undefined;
+        }
         setConnectionState('connecting');
         setError(null);
         const ws = new WebSocket(buildWsUrl());
@@ -151,6 +184,11 @@ export function useLuke(config) {
         ws.binaryType = 'arraybuffer';
         ws.onopen = () => {
             // Wait for handshake message
+            reconnectAttempts.current = 0;
+            if (reconnectTimeout.current) {
+                clearTimeout(reconnectTimeout.current);
+                reconnectTimeout.current = undefined;
+            }
         };
         ws.onmessage = handleServerMessage;
         ws.onerror = () => {
@@ -162,6 +200,26 @@ export function useLuke(config) {
             setConnectionState('disconnected');
             setSessionId(null);
             config.onDisconnect?.();
+            // Handle auto-reconnection
+            if (!isIntentionalDisconnect.current && (config.reconnect ?? true)) {
+                const maxAttempts = config.maxReconnectAttempts ?? 5;
+                const baseInterval = config.reconnectInterval ?? 1000;
+                if (reconnectAttempts.current < maxAttempts) {
+                    reconnectAttempts.current++;
+                    const delay = baseInterval * Math.pow(2, reconnectAttempts.current - 1);
+                    console.log(`[Luke] Connection lost. Reconnecting in ${delay}ms (Attempt ${reconnectAttempts.current}/${maxAttempts})`);
+                    setConnectionState('connecting');
+                    reconnectTimeout.current = setTimeout(() => {
+                        connect();
+                    }, delay);
+                }
+                else {
+                    const err = new Error(`Connection lost. Max reconnection attempts (${maxAttempts}) reached.`);
+                    setError(err);
+                    config.onError?.(err);
+                    setConnectionState('error');
+                }
+            }
         };
     }, [buildWsUrl, handleServerMessage, config]);
     // Audio encoding helper (inline, no worker needed)
@@ -211,35 +269,6 @@ export function useLuke(config) {
         }
         return resampled;
     }, []);
-    // Disconnect from server
-    const disconnect = useCallback(() => {
-        stopRecording();
-        wsRef.current?.close();
-        wsRef.current = null;
-        audioContextRef.current?.close();
-        audioContextRef.current = null;
-    }, []);
-    // Select provider
-    const selectProvider = useCallback((providerId, voiceId) => {
-        const provider = providers.find((p) => p.id === providerId);
-        if (!provider)
-            return;
-        setSelectedProvider(provider);
-        const voice = voiceId ? provider.voices.find((v) => v.id === voiceId) : provider.voices[0];
-        setSelectedVoice(voice ?? null);
-        sendMessage({ type: 'select_provider', providerId, voiceId: voice?.id });
-    }, [providers, sendMessage]);
-    // Select voice
-    const selectVoice = useCallback((voiceId) => {
-        if (!selectedProvider)
-            return;
-        const voice = selectedProvider.voices.find((v) => v.id === voiceId);
-        if (voice) {
-            setSelectedVoice(voice);
-            // Re-select provider with new voice
-            sendMessage({ type: 'select_provider', providerId: selectedProvider.id, voiceId });
-        }
-    }, [selectedProvider, sendMessage]);
     // Start recording audio
     const startRecording = useCallback(async () => {
         if (isRecording)
@@ -257,8 +286,23 @@ export function useLuke(config) {
             });
             mediaStreamRef.current = stream;
             // Create audio context
-            const ctx = new AudioContext({ sampleRate: 48000 });
+            // Use standard sample rate, but we'll detect what the browser actually gives us
+            const ctx = new (window.AudioContext || window.webkitAudioContext)({
+                sampleRate: 48000,
+                latencyHint: 'interactive',
+            });
             audioContextRef.current = ctx;
+            // Initialize worker
+            const worker = new Worker(new URL('../worker/audio.worker.js', import.meta.url), {
+                type: 'module',
+            });
+            workerRef.current = worker;
+            // Configure worker with REAL sample rate and target rate
+            worker.postMessage({
+                type: 'configure',
+                sampleRate: sampleRate || 16000, // Target rate
+                sourceSampleRate: ctx.sampleRate, // Real browser rate
+            });
             // Load audio worklet
             await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([AUDIO_WORKLET_CODE], { type: 'application/javascript' })));
             // Create worklet node
@@ -285,7 +329,17 @@ export function useLuke(config) {
             setError(error);
             config.onError?.(error);
         }
-    }, [isRecording, config]);
+    }, [isRecording, config, encodeAudio, sampleRate]);
+    // Reconfigure worker when sampleRate changes (e.g. provider switch)
+    useEffect(() => {
+        if (workerRef.current && sampleRate) {
+            workerRef.current.postMessage({
+                type: 'configure',
+                sampleRate: sampleRate,
+                sourceSampleRate: audioContextRef.current?.sampleRate
+            });
+        }
+    }, [sampleRate]);
     // Stop recording
     const stopRecording = useCallback(() => {
         if (!isRecording)
@@ -306,6 +360,40 @@ export function useLuke(config) {
         setIsRecording(false);
         setAudioLevel(0);
     }, [isRecording]);
+    // Disconnect from server
+    const disconnect = useCallback(() => {
+        isIntentionalDisconnect.current = true;
+        if (reconnectTimeout.current) {
+            clearTimeout(reconnectTimeout.current);
+            reconnectTimeout.current = undefined;
+        }
+        stopRecording();
+        wsRef.current?.close();
+        wsRef.current = null;
+        audioContextRef.current?.close();
+        audioContextRef.current = null;
+    }, [stopRecording]);
+    // Select provider
+    const selectProvider = useCallback((providerId, voiceId) => {
+        const provider = providers.find((p) => p.id === providerId);
+        if (!provider)
+            return;
+        setSelectedProvider(provider);
+        const voice = voiceId ? provider.voices.find((v) => v.id === voiceId) : provider.voices[0];
+        setSelectedVoice(voice ?? null);
+        sendMessage({ type: 'select_provider', providerId, voiceId: voice?.id });
+    }, [providers, sendMessage]);
+    // Select voice
+    const selectVoice = useCallback((voiceId) => {
+        if (!selectedProvider)
+            return;
+        const voice = selectedProvider.voices.find((v) => v.id === voiceId);
+        if (voice) {
+            setSelectedVoice(voice);
+            // Re-select provider with new voice
+            sendMessage({ type: 'select_provider', providerId: selectedProvider.id, voiceId });
+        }
+    }, [selectedProvider, sendMessage]);
     // Play queued audio
     const playNextAudio = useCallback(() => {
         if (isPlayingRef.current || playbackQueueRef.current.length === 0)
@@ -331,7 +419,18 @@ export function useLuke(config) {
     // Clear transcription
     const clearTranscription = useCallback(() => {
         setTranscription([]);
-    }, []);
+        if (config.persistence) {
+            const key = config.persistenceKey || 'luke_transcription';
+            sessionStorage.removeItem(key);
+        }
+    }, [config.persistence, config.persistenceKey]);
+    // Persist to sessionStorage if enabled
+    useEffect(() => {
+        if (config.persistence) {
+            const key = config.persistenceKey || 'luke_transcription';
+            sessionStorage.setItem(key, JSON.stringify(transcription));
+        }
+    }, [transcription, config.persistence, config.persistenceKey]);
     // Auto-connect if configured
     useEffect(() => {
         if (config.autoConnect) {
