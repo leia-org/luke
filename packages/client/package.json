@@ -1,6 +1,9 @@
 {
-  "name": "@luke/client",
   "version": "0.1.0",
+  "name": "@luke/client",
+  "publishConfig": {
+    "access": "public"
+  },
   "description": "React client for realtime AI voice communication",
   "type": "module",
   "main": "./dist/index.js",
