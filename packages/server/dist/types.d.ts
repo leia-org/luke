@@ -17,6 +17,7 @@ export interface ProviderSessionConfig {
     model?: string;
     voice?: string;
     systemInstruction?: string;
+    history?: Transcription[];
     tools?: ToolDefinition[];
     transcription?: {
         input?: boolean;
@@ -65,20 +66,15 @@ export interface SessionConfig<TSession = unknown, TUser = unknown> {
     onEnd?: (session: TSession, reason: 'disconnect' | 'error' | 'timeout') => Promise<void>;
     getHistory?: (session: TSession) => Promise<Transcription[]>;
     saveHistory?: (session: TSession, transcription: Transcription) => Promise<void>;
+    getSystemInstruction?: (session: TSession) => Promise<string | undefined>;
 }
 export interface LukeServerConfig<TUser = unknown, TSession = unknown> {
+    server?: import('http').Server;
+    path?: string;
     providers: LukeProvider[];
     auth: AuthConfig<TUser>;
-    security?: {
-        encryptionKey?: string;
-    };
-    recording?: {
-        enabled: boolean;
-        directory: string;
-        filenameTemplate?: string;
-    };
     session?: SessionConfig<TSession, TUser>;
-    config?: Partial<ProviderSessionConfig>;
+    config?: Partial<Omit<ProviderSessionConfig, 'systemInstruction'>>;
     onConnect?: (session: LukeSession<TSession>, user: TUser) => void;
     onDisconnect?: (session: LukeSession<TSession>, user: TUser) => void;
     onTranscription?: (transcription: Transcription, session: LukeSession<TSession>) => void;

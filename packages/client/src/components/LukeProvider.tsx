@@ -32,7 +32,7 @@ export function LukeProvider({
     );
 }
 
-// Hook to access Luke context
+// Hook to access Luke context (throws if no provider)
 export function useLukeContext(): UseLukeReturn {
     const context = useContext(LukeContext);
 
@@ -41,4 +41,9 @@ export function useLukeContext(): UseLukeReturn {
     }
 
     return context;
+}
+
+// Hook to access Luke context (returns null if no provider)
+export function useLukeContextOptional(): UseLukeReturn | null {
+    return useContext(LukeContext);
 }

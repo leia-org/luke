@@ -51,8 +51,8 @@ export function useLuke(config: UseLukeConfig): UseLukeReturn {
     const audioContextRef = useRef<AudioContext | null>(null);
     const mediaStreamRef = useRef<MediaStream | null>(null);
     const workletNodeRef = useRef<AudioWorkletNode | null>(null);
-    const workerRef = useRef<Worker | null>(null);
     const isRecordingRef = useRef(false);
+    const sampleRateRef = useRef<number | null>(null);
 
     // Reconnection state
     const isIntentionalDisconnect = useRef(false);
@@ -62,6 +62,8 @@ export function useLuke(config: UseLukeConfig): UseLukeReturn {
     // Playback queue for received audio
     const playbackQueueRef = useRef<Float32Array[]>([]);
     const isPlayingRef = useRef(false);
+    const nextPlayTimeRef = useRef(0);
+    const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
 
     // Build WebSocket URL with auth token
     const buildWsUrl = useCallback(() => {
@@ -113,6 +115,7 @@ export function useLuke(config: UseLukeConfig): UseLukeReturn {
                 case 'session_ready':
                     setSessionId(message.sessionId);
                     setSampleRate(message.sampleRate);
+                    sampleRateRef.current = message.sampleRate;
                     setConnectionState('connected');
                     config.onConnect?.();
                     break;
@@ -166,8 +169,15 @@ export function useLuke(config: UseLukeConfig): UseLukeReturn {
                     break;
 
                 case 'interrupted':
-                    // Clear playback queue on interruption
+                    // Stop all playing audio sources immediately
+                    activeSourcesRef.current.forEach(s => {
+                        try { s.stop(); } catch { /* already stopped */ }
+                    });
+                    activeSourcesRef.current = [];
+                    // Clear playback queue and reset scheduling
                     playbackQueueRef.current = [];
+                    nextPlayTimeRef.current = 0;
+                    isPlayingRef.current = false;
                     break;
 
                 case 'history':
@@ -229,11 +239,15 @@ export function useLuke(config: UseLukeConfig): UseLukeReturn {
         ws.onmessage = handleServerMessage;
 
         ws.onerror = () => {
+            // Ignore errors from stale WebSocket (e.g. React Strict Mode cleanup)
+            if (wsRef.current !== ws) return;
             setError(new Error('WebSocket connection failed'));
             setConnectionState('error');
         };
 
         ws.onclose = () => {
+            // Ignore close events from stale WebSocket (e.g. React Strict Mode cleanup)
+            if (wsRef.current !== ws) return;
             wsRef.current = null;
             setConnectionState('disconnected');
             setSessionId(null);
@@ -297,14 +311,16 @@ export function useLuke(config: UseLukeConfig): UseLukeReturn {
 
     // Audio decoding helper
     const decodeAudio = useCallback((pcmData: ArrayBuffer): Float32Array => {
-        const pcm = new Int16Array(pcmData);
+        // Ensure even byte length for Int16Array (truncate trailing byte if odd)
+        const byteLength = pcmData.byteLength & ~1;
+        const pcm = new Int16Array(pcmData, 0, byteLength / 2);
         const float32 = new Float32Array(pcm.length);
 
         for (let i = 0; i < pcm.length; i++) {
             float32[i] = pcm[i] / (pcm[i] < 0 ? 0x8000 : 0x7fff);
         }
 
-        // Resample from 24kHz to 48kHz
+        // Resample from 24kHz to 48kHz (both OpenAI and Gemini output at 24kHz)
         const ratio = 24000 / 48000;
         const outputLength = Math.ceil(float32.length / ratio);
         const resampled = new Float32Array(outputLength);
@@ -345,19 +361,6 @@ export function useLuke(config: UseLukeConfig): UseLukeReturn {
             });
             audioContextRef.current = ctx;
 
-            // Initialize worker
-            const worker = new Worker(new URL('../worker/audio.worker.js', import.meta.url), {
-                type: 'module',
-            });
-            workerRef.current = worker;
-
-            // Configure worker with REAL sample rate and target rate
-            worker.postMessage({
-                type: 'configure',
-                sampleRate: sampleRate || 16000, // Target rate
-                sourceSampleRate: ctx.sampleRate, // Real browser rate
-            });
-
             // Load audio worklet
             await ctx.audioWorklet.addModule(
                 URL.createObjectURL(
@@ -375,9 +378,10 @@ export function useLuke(config: UseLukeConfig): UseLukeReturn {
                 if (!isRecordingRef.current) return;
 
                 const samples = event.data as Float32Array;
-                // Encode and send to server
-                if (wsRef.current?.readyState === WebSocket.OPEN && sampleRate) {
-                    const pcm = encodeAudio(new Float32Array(samples), sampleRate);
+                // Encode and send to server (use ref to always get latest sampleRate)
+                const currentRate = sampleRateRef.current;
+                if (wsRef.current?.readyState === WebSocket.OPEN && currentRate) {
+                    const pcm = encodeAudio(new Float32Array(samples), currentRate);
                     wsRef.current.send(pcm);
                 }
             };
@@ -392,16 +396,16 @@ export function useLuke(config: UseLukeConfig): UseLukeReturn {
         }
     }, [isRecording, config, encodeAudio, sampleRate]);
 
-    // Reconfigure worker when sampleRate changes (e.g. provider switch)
-    useEffect(() => {
-        if (workerRef.current && sampleRate) {
-            workerRef.current.postMessage({
-                type: 'configure',
-                sampleRate: sampleRate,
-                sourceSampleRate: audioContextRef.current?.sampleRate
-            });
-        }
-    }, [sampleRate]);
+    // Stop all audio playback immediately
+    const stopPlayback = useCallback(() => {
+        activeSourcesRef.current.forEach(s => {
+            try { s.stop(); } catch { /* already stopped */ }
+        });
+        activeSourcesRef.current = [];
+        playbackQueueRef.current = [];
+        nextPlayTimeRef.current = 0;
+        isPlayingRef.current = false;
+    }, []);
 
     // Stop recording
     const stopRecording = useCallback(() => {
@@ -419,13 +423,15 @@ export function useLuke(config: UseLukeConfig): UseLukeReturn {
         mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
         mediaStreamRef.current = null;
 
-        // Close audio context (but keep it for playback if needed)
-        // audioContextRef.current?.close();
-        // audioContextRef.current = null;
+        // Stop AI playback and send interrupt to server
+        stopPlayback();
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: 'interrupt' }));
+        }
 
         setIsRecording(false);
         setAudioLevel(0);
-    }, [isRecording]);
+    }, [isRecording, stopPlayback]);
 
     // Disconnect from server
     const disconnect = useCallback(() => {
@@ -435,11 +441,12 @@ export function useLuke(config: UseLukeConfig): UseLukeReturn {
             reconnectTimeout.current = undefined;
         }
         stopRecording();
+        stopPlayback();
         wsRef.current?.close();
         wsRef.current = null;
         audioContextRef.current?.close();
         audioContextRef.current = null;
-    }, [stopRecording]);
+    }, [stopRecording, stopPlayback]);
 
     // Select provider
     const selectProvider = useCallback((providerId: string, voiceId?: string) => {
@@ -466,31 +473,44 @@ export function useLuke(config: UseLukeConfig): UseLukeReturn {
 
 
 
-    // Play queued audio
+    // Play queued audio with precise scheduling (no gaps between chunks)
     const playNextAudio = useCallback(() => {
-        if (isPlayingRef.current || playbackQueueRef.current.length === 0) return;
-        if (!audioContextRef.current) return;
+        if (!audioContextRef.current || playbackQueueRef.current.length === 0) return;
 
         isPlayingRef.current = true;
-        const samples = playbackQueueRef.current.shift()!;
+        const ctx = audioContextRef.current;
 
-        // Create new Float32Array with explicit ArrayBuffer type
-        const audioData = new Float32Array(samples.length);
-        audioData.set(samples);
+        // Schedule all queued chunks back-to-back
+        while (playbackQueueRef.current.length > 0) {
+            const samples = playbackQueueRef.current.shift()!;
 
-        const buffer = audioContextRef.current.createBuffer(1, audioData.length, 48000);
-        buffer.copyToChannel(audioData, 0);
+            const audioData = new Float32Array(samples.length);
+            audioData.set(samples);
 
-        const source = audioContextRef.current.createBufferSource();
-        source.buffer = buffer;
-        source.connect(audioContextRef.current.destination);
+            const buffer = ctx.createBuffer(1, audioData.length, 48000);
+            buffer.copyToChannel(audioData, 0);
 
-        source.onended = () => {
-            isPlayingRef.current = false;
-            playNextAudio();
-        };
+            const source = ctx.createBufferSource();
+            source.buffer = buffer;
+            source.connect(ctx.destination);
 
-        source.start();
+            // Track active source for interruption
+            activeSourcesRef.current.push(source);
+
+            // Schedule to start exactly when the previous chunk ends
+            const startTime = Math.max(ctx.currentTime, nextPlayTimeRef.current);
+            source.start(startTime);
+            nextPlayTimeRef.current = startTime + buffer.duration;
+
+            // Track when the last scheduled chunk finishes
+            source.onended = () => {
+                // Remove from active sources
+                activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== source);
+                if (playbackQueueRef.current.length === 0) {
+                    isPlayingRef.current = false;
+                }
+            };
+        }
     }, []);
 
     // Clear transcription

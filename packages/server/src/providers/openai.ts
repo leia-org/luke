@@ -99,6 +99,23 @@ async function createOpenAIConnection(
                 session: sessionConfig,
             }));
 
+            // Inject conversation history for provider hot-swap
+            if (config.history && config.history.length > 0) {
+                for (const msg of config.history) {
+                    ws.send(JSON.stringify({
+                        type: 'conversation.item.create',
+                        item: {
+                            type: 'message',
+                            role: msg.role === 'assistant' ? 'assistant' : 'user',
+                            content: [{
+                                type: msg.role === 'assistant' ? 'text' : 'input_text',
+                                text: msg.text,
+                            }],
+                        },
+                    }));
+                }
+            }
+
             resolve();
         });
 

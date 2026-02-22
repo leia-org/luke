@@ -76,6 +76,16 @@
 }
 
 /* Modes */
+.luke-mode-inline {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    background-color: var(--luke-bg-color);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
 .luke-mode-fullscreen {
     position: fixed;
     inset: 0;

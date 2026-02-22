@@ -106,6 +106,18 @@ async function createGeminiConnection(
                 // Wait for setupComplete before resolving
                 if (message.setupComplete !== undefined) {
                     clearTimeout(timeout);
+
+                    // Inject conversation history for provider hot-swap
+                    if (config.history && config.history.length > 0) {
+                        const turns = config.history.map(msg => ({
+                            role: msg.role === 'assistant' ? 'model' : 'user',
+                            parts: [{ text: msg.text }],
+                        }));
+                        ws.send(JSON.stringify({
+                            clientContent: { turns, turnComplete: false },
+                        }));
+                    }
+
                     resolve();
                 }
             } catch (err) {

@@ -1,8 +1,10 @@
 import React from 'react';
-export type LukeUIMode = 'fullscreen' | 'modal';
+import { TranscriptionMessage, UseLukeReturn } from '../types.js';
+export type LukeUIMode = 'fullscreen' | 'modal' | 'inline';
 export type LukeUIPosition = 'bottom-right' | 'bottom-left' | 'center';
 export type LukeUITheme = 'light' | 'dark' | 'auto';
 interface VoiceClientUIProps {
+    luke?: UseLukeReturn;
     mode?: LukeUIMode;
     position?: LukeUIPosition;
     theme?: LukeUITheme;
@@ -11,6 +13,10 @@ interface VoiceClientUIProps {
     height?: string;
     onClose?: () => void;
     showSettings?: boolean;
+    showTranscription?: boolean;
+    showProviderSelector?: boolean;
+    showExpandButton?: boolean;
+    onTranscription?: (message: TranscriptionMessage) => void;
 }
 export declare const VoiceClientUI: React.FC<VoiceClientUIProps>;
 export {};

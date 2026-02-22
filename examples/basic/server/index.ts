@@ -98,38 +98,24 @@ const lukeServer = createLukeServer({
         },
         // Implement history hooks
         getHistory: async (session) => {
-            // Load history for this user
-            // In a real app, you might scope this by session ID or retain it per user
             return historyStore.get(session.userId) || [];
         },
         saveHistory: async (session, transcription) => {
-            // Save history for this user
             const current = historyStore.get(session.userId) || [];
             current.push(transcription);
             historyStore.set(session.userId, current);
-            console.log(`[Persistence] Saved message for ${session.userId} (Encrypted: ${transcription.text.includes(':')})`);
-        }
-    },
-
-    // Enable encryption (optional)
-    security: {
-        // Hardcoded key for demo (32 bytes hex)
-        // In production, use a secure env variable
-        encryptionKey: process.env.ENCRYPTION_KEY || '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f'
-    },
-
-    recording: {
-        enabled: true,
-        directory: './recordings',
-        filenameTemplate: 'demo_{id}_X_N',
+            console.log(`[Persistence] Saved message for ${session.userId}`);
+        },
+        getSystemInstruction: async (session) => {
+            // Return per-session system instruction
+            // In production, load from database based on session/user context
+            return `You are Luke, a friendly AI voice assistant.
+Keep your responses concise and conversational.`;
+        },
     },
 
     config: {
-        systemInstruction: `You are Luke, a friendly AI voice assistant. 
-Keep your responses concise and conversational.`,
         transcription: { input: true, output: true },
-        // Tools disabled for now - requires proper JSON schema generation
-        // tools: [...],
     },
 
     onConnect: (session, user) => {

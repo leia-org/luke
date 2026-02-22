@@ -16,12 +16,16 @@ export function LukeProvider({ serverUrl, authToken, autoConnect = false, persis
     });
     return (_jsx(LukeContext.Provider, { value: luke, children: children }));
 }
-// Hook to access Luke context
+// Hook to access Luke context (throws if no provider)
 export function useLukeContext() {
     const context = useContext(LukeContext);
     if (!context) {
         throw new Error('useLukeContext must be used within a LukeProvider');
     }
     return context;
+}
+// Hook to access Luke context (returns null if no provider)
+export function useLukeContextOptional() {
+    return useContext(LukeContext);
 }
 //# sourceMappingURL=LukeProvider.js.map
