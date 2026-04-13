@@ -52,6 +52,10 @@ export function useLuke(config: UseLukeConfig): UseLukeReturn {
     const audioContextRef = useRef<AudioContext | null>(null);
     const mediaStreamRef = useRef<MediaStream | null>(null);
     const workletNodeRef = useRef<AudioWorkletNode | null>(null);
+    // True once the AudioWorkletProcessor module has been registered on
+    // the current AudioContext. Reset whenever the context is recreated
+    // (see startRecording below).
+    const workletModuleLoadedRef = useRef(false);
     const isRecordingRef = useRef(false);
     const sampleRateRef = useRef<number | null>(null);
 
@@ -342,16 +346,18 @@ export function useLuke(config: UseLukeConfig): UseLukeReturn {
         if (isRecordingRef.current) return;
         isRecordingRef.current = true;
 
-        // Defensive: tear down anything a previous startRecording may have
-        // left behind if cleanup was skipped (e.g. error on connect).
+        // Defensive: tear down any previous worklet / stream the previous
+        // startRecording may have left behind. We intentionally DO NOT
+        // close the AudioContext here — the same context owns the
+        // assistant playback chain (Analyser + BufferSourceNodes). Closing
+        // it mid-response would silence the assistant and leave a stale
+        // analyser ref that the next playback attempt can't use. The
+        // context is only torn down in `disconnect()` or when the hook
+        // actually stops for good.
         if (workletNodeRef.current) {
             try { workletNodeRef.current.port.onmessage = null; } catch { /* ignore */ }
             try { workletNodeRef.current.disconnect(); } catch { /* ignore */ }
             workletNodeRef.current = null;
-        }
-        if (audioContextRef.current) {
-            try { await audioContextRef.current.close(); } catch { /* ignore */ }
-            audioContextRef.current = null;
         }
         if (mediaStreamRef.current) {
             try { mediaStreamRef.current.getTracks().forEach(t => t.stop()); } catch { /* ignore */ }
@@ -370,24 +376,37 @@ export function useLuke(config: UseLukeConfig): UseLukeReturn {
             });
             mediaStreamRef.current = stream;
 
-            // Create audio context
-            // Use standard sample rate, but we'll detect what the browser actually gives us
-            const ctx = new (window.AudioContext || (window as any).webkitAudioContext)({
-                sampleRate: 48000,
-                latencyHint: 'interactive',
-            });
-            audioContextRef.current = ctx;
+            // Reuse the existing AudioContext if we already have one (e.g.
+            // the user muted and is now unmuting). Creating a new one would
+            // orphan the assistant playback chain that lives inside it.
+            let ctx = audioContextRef.current;
+            if (!ctx) {
+                ctx = new (window.AudioContext || (window as any).webkitAudioContext)({
+                    sampleRate: 48000,
+                    latencyHint: 'interactive',
+                });
+                audioContextRef.current = ctx;
+                workletModuleLoadedRef.current = false;
+            } else if (ctx.state === 'suspended') {
+                try { await ctx.resume(); } catch { /* ignore */ }
+            }
 
             // AudioWorklet: runs on the dedicated audio thread so we don't
             // block the main thread and the worklet isn't deprecated. We
             // route its output through a muted GainNode to ctx.destination
             // so the graph stays live (Chrome won't call `process()` on a
             // node whose output doesn't reach destination).
-            await ctx.audioWorklet.addModule(
-                URL.createObjectURL(
-                    new Blob([AUDIO_WORKLET_CODE], { type: 'application/javascript' })
-                )
-            );
+            //
+            // Only register the processor module on first use per context —
+            // calling registerProcessor twice with the same name throws.
+            if (!workletModuleLoadedRef.current) {
+                await ctx.audioWorklet.addModule(
+                    URL.createObjectURL(
+                        new Blob([AUDIO_WORKLET_CODE], { type: 'application/javascript' })
+                    )
+                );
+                workletModuleLoadedRef.current = true;
+            }
 
             const source = ctx.createMediaStreamSource(stream);
             const worklet = new AudioWorkletNode(ctx, 'audio-processor');
@@ -494,6 +513,14 @@ export function useLuke(config: UseLukeConfig): UseLukeReturn {
         wsRef.current = null;
         audioContextRef.current?.close();
         audioContextRef.current = null;
+        // Reset analyser + worklet-module flag tied to the closed context
+        // so the next connect rebuilds them on the new context.
+        if (assistantLevelRafRef.current != null) {
+            cancelAnimationFrame(assistantLevelRafRef.current);
+            assistantLevelRafRef.current = null;
+        }
+        assistantAnalyserRef.current = null;
+        workletModuleLoadedRef.current = false;
     }, [stopRecording, stopPlayback]);
 
     // Select provider
