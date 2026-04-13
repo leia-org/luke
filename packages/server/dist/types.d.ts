@@ -111,6 +111,9 @@ export type ClientMessage = {
 } | {
     type: 'reconnect';
     sessionId: string;
+} | {
+    type: 'client_audio_format';
+    sampleRate: number;
 };
 export type ServerMessage = HandshakeMessage | {
     type: 'session_ready';

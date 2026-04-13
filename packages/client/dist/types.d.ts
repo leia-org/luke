@@ -45,6 +45,8 @@ export interface UseLukeReturn {
     startRecording: () => Promise<void>;
     stopRecording: () => void;
     audioLevel: number;
+    /** RMS level (0–1) of the assistant's most recently decoded audio chunk. */
+    assistantAudioLevel: number;
     transcription: TranscriptionMessage[];
     clearTranscription: () => void;
     sessionId: string | null;

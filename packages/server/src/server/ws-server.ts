@@ -34,6 +34,29 @@ export function createLukeServer<TUser, TSession>(
     const users = new Map<WebSocket, TUser>();
     // In-memory conversation history per connection (for provider hot-swap)
     const conversationHistory = new Map<WebSocket, Transcription[]>();
+    // Per-connection audio input sample rate advertised by the client via
+    // the `client_audio_format` message. Defaults to 48000 if never sent.
+    const clientSampleRates = new Map<WebSocket, number>();
+
+    // Linear-interpolation resample of a PCM16 LE mono buffer.
+    function resamplePcm16(input: Buffer, fromRate: number, toRate: number): Buffer {
+        if (fromRate === toRate) return input;
+        const inSamples = input.length / 2;
+        const ratio = fromRate / toRate;
+        const outSamples = Math.floor(inSamples / ratio);
+        const out = Buffer.alloc(outSamples * 2);
+        for (let i = 0; i < outSamples; i++) {
+            const srcPos = i * ratio;
+            const idx0 = Math.floor(srcPos);
+            const idx1 = Math.min(idx0 + 1, inSamples - 1);
+            const frac = srcPos - idx0;
+            const s0 = input.readInt16LE(idx0 * 2);
+            const s1 = input.readInt16LE(idx1 * 2);
+            const sample = Math.round(s0 * (1 - frac) + s1 * frac);
+            out.writeInt16LE(Math.max(-32768, Math.min(32767, sample)), i * 2);
+        }
+        return out;
+    }
 
     // Handle WebSocket upgrade with auth
     httpServer.on('upgrade', async (req, socket, head) => {
@@ -152,11 +175,24 @@ export function createLukeServer<TUser, TSession>(
                 await handleSelectProvider(ws, message.providerId, message.voiceId, session, user);
                 break;
 
+            case 'client_audio_format':
+                clientSampleRates.set(ws, message.sampleRate);
+                break;
+
             case 'audio':
                 if (session.providerConnection) {
+                    const fromRate = clientSampleRates.get(ws) ?? 48000;
+                    const provider = config.providers.find((p) => p.id === session.providerId);
+                    const toRate = provider?.sampleRate ?? fromRate;
+                    const inputBuf = Buffer.from(
+                        message.data,
+                        0,
+                        message.data.byteLength
+                    );
+                    const resampled = resamplePcm16(inputBuf, fromRate, toRate);
                     session.providerConnection.send({
                         type: 'audio',
-                        data: new Uint8Array(message.data),
+                        data: new Uint8Array(resampled.buffer, resampled.byteOffset, resampled.byteLength),
                     });
                 }
                 break;
@@ -359,6 +395,7 @@ export function createLukeServer<TUser, TSession>(
         sessions.delete(ws);
         users.delete(ws);
         conversationHistory.delete(ws);
+        clientSampleRates.delete(ws);
     }
 
     // Send error message to client

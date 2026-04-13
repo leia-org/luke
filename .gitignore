@@ -25,3 +25,5 @@ playwright-report
 test-results
 tmp
 temp
+.npmrc
+.yarnrc

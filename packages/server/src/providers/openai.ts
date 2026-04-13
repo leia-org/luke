@@ -64,6 +64,12 @@ async function createOpenAIConnection(
     let onInterruptedHandler: (() => void) | null = null;
     let onErrorHandler: ((error: Error) => void) | null = null;
 
+    // Tracks whether OpenAI currently has an in-flight response so we
+    // don't send response.cancel when there's nothing to cancel. If we do,
+    // OpenAI returns `error: "Cancellation failed: no active response"`
+    // which bubbles back to the client as PROVIDER_ERROR.
+    let responseActive = false;
+
     // Wait for connection to open
     await new Promise<void>((resolve, reject) => {
         ws.on('open', () => {
@@ -175,7 +181,14 @@ async function createOpenAIConnection(
                 break;
             }
 
-            case 'response.done': {
+            case 'response.created': {
+                responseActive = true;
+                break;
+            }
+
+            case 'response.done':
+            case 'response.cancelled': {
+                responseActive = false;
                 onTurnCompleteHandler?.();
                 break;
             }
@@ -187,8 +200,15 @@ async function createOpenAIConnection(
             }
 
             case 'error': {
-                const errorMsg = (message.error as Record<string, unknown>)?.message || 'Unknown error';
-                onErrorHandler?.(new Error(String(errorMsg)));
+                const errorMsg = String((message.error as Record<string, unknown>)?.message || 'Unknown error');
+                // Swallow the benign cancel-when-idle race: OpenAI returns
+                // this if the response already finished by the time our
+                // cancel arrived, or if we cancel when nothing is active.
+                if (errorMsg.includes('Cancellation failed: no active response')) {
+                    responseActive = false;
+                    break;
+                }
+                onErrorHandler?.(new Error(errorMsg));
                 break;
             }
         }
@@ -244,9 +264,10 @@ async function createOpenAIConnection(
         },
 
         interrupt() {
-            if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'response.cancel' }));
-            }
+            if (ws.readyState !== WebSocket.OPEN) return;
+            if (!responseActive) return;
+            responseActive = false;
+            ws.send(JSON.stringify({ type: 'response.cancel' }));
         },
 
         async disconnect() {

@@ -15,6 +15,7 @@ export function useLuke(config) {
     // Audio state
     const [isRecording, setIsRecording] = useState(false);
     const [audioLevel, setAudioLevel] = useState(0);
+    const [assistantAudioLevel, setAssistantAudioLevel] = useState(0);
     // Transcription state
     const [transcription, setTranscription] = useState(() => {
         // Only load from localStorage if explicitly enabled (client-side persistence)
@@ -46,6 +47,11 @@ export function useLuke(config) {
     const isPlayingRef = useRef(false);
     const nextPlayTimeRef = useRef(0);
     const activeSourcesRef = useRef([]);
+    // Analyser on the playback chain, polled via RAF to report the real
+    // assistant audio level while it's actually coming out of the speakers
+    // (not when the chunk was received from the network).
+    const assistantAnalyserRef = useRef(null);
+    const assistantLevelRafRef = useRef(null);
     // Build WebSocket URL with auth token
     const buildWsUrl = useCallback(() => {
         const url = new URL(config.serverUrl);
@@ -138,7 +144,8 @@ export function useLuke(config) {
                     config.onTranscription?.(transcriptionMsg);
                     break;
                 case 'turn_complete':
-                    // Model finished speaking
+                    // Model finished speaking — fade the assistant level
+                    setAssistantAudioLevel(0);
                     break;
                 case 'interrupted':
                     // Stop all playing audio sources immediately
@@ -153,6 +160,7 @@ export function useLuke(config) {
                     playbackQueueRef.current = [];
                     nextPlayTimeRef.current = 0;
                     isPlayingRef.current = false;
+                    setAssistantAudioLevel(0);
                     break;
                 case 'history':
                     // Always accept history from server if sent
@@ -241,32 +249,19 @@ export function useLuke(config) {
             }
         };
     }, [buildWsUrl, handleServerMessage, config]);
-    // Audio encoding helper (inline, no worker needed)
-    const encodeAudio = useCallback((samples, targetRate) => {
-        // Resample from 48kHz to target rate
-        const ratio = 48000 / targetRate;
-        const outputLength = Math.ceil(samples.length / ratio);
-        const resampled = new Float32Array(outputLength);
-        for (let i = 0; i < outputLength; i++) {
-            const srcIndex = i * ratio;
-            const srcFloor = Math.floor(srcIndex);
-            const srcCeil = Math.min(srcFloor + 1, samples.length - 1);
-            const frac = srcIndex - srcFloor;
-            resampled[i] = samples[srcFloor] * (1 - frac) + samples[srcCeil] * frac;
-        }
-        // Convert to 16-bit PCM
-        const pcm = new Int16Array(resampled.length);
-        for (let i = 0; i < resampled.length; i++) {
-            const s = Math.max(-1, Math.min(1, resampled[i]));
-            pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-        }
-        // Calculate level
+    // Resampling and PCM16 encoding happen inside the AudioWorkletProcessor
+    // on the audio thread — see AUDIO_WORKLET_CODE at the bottom of this
+    // file. The main thread just forwards the resulting ArrayBuffer to
+    // the WebSocket. This helper is kept only to compute the RMS level
+    // for the UI visualizer from the raw PCM16 bytes.
+    const computeLevelFromPcm16 = useCallback((buf) => {
+        const view = new Int16Array(buf);
         let sum = 0;
-        for (let i = 0; i < resampled.length; i++) {
-            sum += resampled[i] * resampled[i];
+        for (let i = 0; i < view.length; i++) {
+            const s = view[i] / 0x8000;
+            sum += s * s;
         }
-        setAudioLevel(Math.sqrt(sum / resampled.length));
-        return pcm.buffer;
+        setAudioLevel(view.length > 0 ? Math.sqrt(sum / view.length) : 0);
     }, []);
     // Audio decoding helper
     const decodeAudio = useCallback((pcmData) => {
@@ -277,8 +272,11 @@ export function useLuke(config) {
         for (let i = 0; i < pcm.length; i++) {
             float32[i] = pcm[i] / (pcm[i] < 0 ? 0x8000 : 0x7fff);
         }
-        // Resample from 24kHz to 48kHz (both OpenAI and Gemini output at 24kHz)
-        const ratio = 24000 / 48000;
+        // Resample from the provider's output rate (24kHz for both OpenAI and
+        // Gemini) to the AudioContext's actual rate — not a hardcoded 48000,
+        // since the browser may run the context at 44100 or other values.
+        const destRate = audioContextRef.current?.sampleRate ?? 48000;
+        const ratio = 24000 / destRate;
         const outputLength = Math.ceil(float32.length / ratio);
         const resampled = new Float32Array(outputLength);
         for (let i = 0; i < outputLength; i++) {
@@ -292,9 +290,43 @@ export function useLuke(config) {
     }, []);
     // Start recording audio
     const startRecording = useCallback(async () => {
-        if (isRecording)
+        // Use the ref, not the state, as the guard. React effects (including
+        // Strict Mode double-invocation) can fire startRecording multiple
+        // times before `isRecording` state has propagated, which would
+        // otherwise create several ScriptProcessorNodes running in parallel
+        // against the same WebSocket — they'd each emit audio every tick
+        // and multiply the upload byte rate by N, completely desyncing the
+        // provider's view of time.
+        if (isRecordingRef.current)
             return;
         isRecordingRef.current = true;
+        // Defensive: tear down anything a previous startRecording may have
+        // left behind if cleanup was skipped (e.g. error on connect).
+        if (workletNodeRef.current) {
+            try {
+                workletNodeRef.current.port.onmessage = null;
+            }
+            catch { /* ignore */ }
+            try {
+                workletNodeRef.current.disconnect();
+            }
+            catch { /* ignore */ }
+            workletNodeRef.current = null;
+        }
+        if (audioContextRef.current) {
+            try {
+                await audioContextRef.current.close();
+            }
+            catch { /* ignore */ }
+            audioContextRef.current = null;
+        }
+        if (mediaStreamRef.current) {
+            try {
+                mediaStreamRef.current.getTracks().forEach(t => t.stop());
+            }
+            catch { /* ignore */ }
+            mediaStreamRef.current = null;
+        }
         try {
             // Get microphone access
             const stream = await navigator.mediaDevices.getUserMedia({
@@ -313,25 +345,45 @@ export function useLuke(config) {
                 latencyHint: 'interactive',
             });
             audioContextRef.current = ctx;
-            // Load audio worklet
+            // AudioWorklet: runs on the dedicated audio thread so we don't
+            // block the main thread and the worklet isn't deprecated. We
+            // route its output through a muted GainNode to ctx.destination
+            // so the graph stays live (Chrome won't call `process()` on a
+            // node whose output doesn't reach destination).
             await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([AUDIO_WORKLET_CODE], { type: 'application/javascript' })));
-            // Create worklet node
             const source = ctx.createMediaStreamSource(stream);
             const worklet = new AudioWorkletNode(ctx, 'audio-processor');
             workletNodeRef.current = worklet;
-            // Handle audio data from worklet
+            // Tell the worklet what rate the provider wants. The worklet
+            // does the resample + PCM16 encode on the audio thread and
+            // posts back ready-to-send ArrayBuffer chunks.
+            const targetRate = sampleRateRef.current ?? 16000;
+            worklet.port.postMessage({ type: 'setTargetRate', rate: targetRate });
+            // Advertise the on-the-wire rate to the server so its pass-through
+            // (and optional resample fallback) knows what's coming in.
+            if (wsRef.current?.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({
+                    type: 'client_audio_format',
+                    sampleRate: targetRate,
+                }));
+            }
             worklet.port.onmessage = (event) => {
                 if (!isRecordingRef.current)
                     return;
-                const samples = event.data;
-                // Encode and send to server (use ref to always get latest sampleRate)
-                const currentRate = sampleRateRef.current;
-                if (wsRef.current?.readyState === WebSocket.OPEN && currentRate) {
-                    const pcm = encodeAudio(new Float32Array(samples), currentRate);
-                    wsRef.current.send(pcm);
+                // The worklet posts already-encoded PCM16 ArrayBuffers.
+                const buf = event.data;
+                if (wsRef.current?.readyState === WebSocket.OPEN) {
+                    wsRef.current.send(buf);
                 }
+                computeLevelFromPcm16(buf);
             };
             source.connect(worklet);
+            // Keep the worklet branch alive by routing it through a muted
+            // GainNode to destination. Gain is 0 so nothing is played back.
+            const sink = ctx.createGain();
+            sink.gain.value = 0;
+            worklet.connect(sink);
+            sink.connect(ctx.destination);
             setIsRecording(true);
         }
         catch (err) {
@@ -340,7 +392,7 @@ export function useLuke(config) {
             setError(error);
             config.onError?.(error);
         }
-    }, [isRecording, config, encodeAudio, sampleRate]);
+    }, [isRecording, config, computeLevelFromPcm16, sampleRate]);
     // Stop all audio playback immediately
     const stopPlayback = useCallback(() => {
         activeSourcesRef.current.forEach(s => {
@@ -353,8 +405,24 @@ export function useLuke(config) {
         playbackQueueRef.current = [];
         nextPlayTimeRef.current = 0;
         isPlayingRef.current = false;
+        if (assistantLevelRafRef.current != null) {
+            cancelAnimationFrame(assistantLevelRafRef.current);
+            assistantLevelRafRef.current = null;
+        }
+        setAssistantAudioLevel(0);
     }, []);
-    // Stop recording
+    // Stop recording.
+    //
+    // This ONLY stops the user's microphone. It intentionally does NOT:
+    //   - Stop the assistant's playback mid-sentence (that would cut off
+    //     whatever the model was currently saying).
+    //   - Send `interrupt` to the server to cancel the in-flight response
+    //     (same reason + triggers "Cancellation failed: no active response"
+    //     on OpenAI when nothing is active).
+    //
+    // If a caller wants the "barge-in" behavior (stop mic + cut assistant
+    // playback + cancel response), they should invoke `interrupt()` or
+    // `stopPlayback()` explicitly alongside this.
     const stopRecording = useCallback(() => {
         if (!isRecording)
             return;
@@ -368,14 +436,9 @@ export function useLuke(config) {
         // Stop all media tracks
         mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
         mediaStreamRef.current = null;
-        // Stop AI playback and send interrupt to server
-        stopPlayback();
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-            wsRef.current.send(JSON.stringify({ type: 'interrupt' }));
-        }
         setIsRecording(false);
         setAudioLevel(0);
-    }, [isRecording, stopPlayback]);
+    }, [isRecording]);
     // Disconnect from server
     const disconnect = useCallback(() => {
         isIntentionalDisconnect.current = true;
@@ -417,6 +480,34 @@ export function useLuke(config) {
             return;
         isPlayingRef.current = true;
         const ctx = audioContextRef.current;
+        // Create the analyser lazily the first time we have a context so
+        // the component can visualize the assistant's real playback level.
+        if (!assistantAnalyserRef.current) {
+            const analyser = ctx.createAnalyser();
+            analyser.fftSize = 512;
+            analyser.smoothingTimeConstant = 0.3;
+            analyser.connect(ctx.destination);
+            assistantAnalyserRef.current = analyser;
+        }
+        // Start the RAF polling loop if not already running.
+        if (assistantLevelRafRef.current == null) {
+            const buf = new Float32Array(assistantAnalyserRef.current.fftSize);
+            const tick = () => {
+                const a = assistantAnalyserRef.current;
+                if (!a) {
+                    assistantLevelRafRef.current = null;
+                    return;
+                }
+                a.getFloatTimeDomainData(buf);
+                let sum = 0;
+                for (let i = 0; i < buf.length; i++)
+                    sum += buf[i] * buf[i];
+                const rms = Math.sqrt(sum / buf.length);
+                setAssistantAudioLevel(rms);
+                assistantLevelRafRef.current = requestAnimationFrame(tick);
+            };
+            assistantLevelRafRef.current = requestAnimationFrame(tick);
+        }
         // Schedule all queued chunks back-to-back
         while (playbackQueueRef.current.length > 0) {
             const samples = playbackQueueRef.current.shift();
@@ -426,7 +517,9 @@ export function useLuke(config) {
             buffer.copyToChannel(audioData, 0);
             const source = ctx.createBufferSource();
             source.buffer = buffer;
-            source.connect(ctx.destination);
+            // Route through the analyser so the RAF loop sees the actual
+            // samples being played out (not just the chunk that was decoded).
+            source.connect(assistantAnalyserRef.current);
             // Track active source for interruption
             activeSourcesRef.current.push(source);
             // Schedule to start exactly when the previous chunk ends
@@ -483,22 +576,81 @@ export function useLuke(config) {
         startRecording,
         stopRecording,
         audioLevel,
+        assistantAudioLevel,
         transcription,
         clearTranscription,
         sessionId,
         sampleRate,
     };
 }
-// AudioWorklet processor code (inlined to avoid separate file)
+// AudioWorklet processor: runs on the audio thread (off the main thread).
+// Accepts a target sample rate via port.postMessage({type:'setTargetRate'})
+// and does the resample + Float32→PCM16 conversion in-place, posting back
+// the resulting Int16Array buffer. This keeps the main thread entirely
+// free of audio work — the main thread only forwards the ArrayBuffer to
+// the WebSocket.
+//
+// The resampler maintains a sub-sample cursor across process() calls so
+// non-integer ratios (e.g. 44.1k→16k) don't introduce gaps or clicks at
+// block boundaries. Linear interpolation — no anti-aliasing filter. For
+// voice content below ~4kHz this is acceptable.
 const AUDIO_WORKLET_CODE = `
 class AudioProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.targetRate = 16000;
+    this.cursor = 0;       // fractional read position into the next block
+    this.tail = null;      // previous block's last sample for cross-block interp
+    this.port.onmessage = (event) => {
+      if (event.data && event.data.type === 'setTargetRate') {
+        this.targetRate = event.data.rate;
+        this.cursor = 0;
+        this.tail = null;
+      }
+    };
+  }
+
   process(inputs) {
     const input = inputs[0];
-    if (input && input.length > 0) {
-      const samples = input[0];
-      if (samples && samples.length > 0) {
-        this.port.postMessage(new Float32Array(samples));
-      }
+    if (!input || input.length === 0) return true;
+    const samples = input[0];
+    if (!samples || samples.length === 0) return true;
+
+    const srcRate = sampleRate; // AudioWorkletGlobalScope global
+    const ratio = srcRate / this.targetRate;
+
+    // Estimate max output length; we'll trim to the exact count used.
+    const maxOut = Math.ceil((samples.length + 2) / ratio) + 1;
+    const out = new Int16Array(maxOut);
+
+    // Build a virtual source that lets us read index -1 as the previous
+    // block's tail, so interpolation across the block boundary is smooth.
+    const sampleAt = (idx) => {
+      if (idx < 0) return this.tail !== null ? this.tail : samples[0];
+      if (idx >= samples.length) return samples[samples.length - 1];
+      return samples[idx];
+    };
+
+    let written = 0;
+    let pos = this.cursor;
+    while (pos < samples.length) {
+      const idx0 = Math.floor(pos);
+      const idx1 = idx0 + 1;
+      const frac = pos - idx0;
+      const s = sampleAt(idx0) * (1 - frac) + sampleAt(idx1) * frac;
+      const clipped = s < -1 ? -1 : (s > 1 ? 1 : s);
+      out[written++] = clipped < 0 ? clipped * 0x8000 : clipped * 0x7fff;
+      pos += ratio;
+    }
+
+    // Advance cursor into next block (preserve fractional phase)
+    this.cursor = pos - samples.length;
+    this.tail = samples[samples.length - 1];
+
+    if (written > 0) {
+      // Ship only the used portion
+      const packed = out.slice(0, written);
+      this.port.postMessage(packed.buffer, [packed.buffer]);
     }
     return true;
   }

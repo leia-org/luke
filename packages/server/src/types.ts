@@ -130,7 +130,8 @@ export type ClientMessage =
     | { type: 'audio'; data: ArrayBuffer }
     | { type: 'text'; content: string }
     | { type: 'interrupt' }
-    | { type: 'reconnect'; sessionId: string };
+    | { type: 'reconnect'; sessionId: string }
+    | { type: 'client_audio_format'; sampleRate: number };
 
 // Messages from server to client
 export type ServerMessage =
