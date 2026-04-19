@@ -1,7 +1,13 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { LukeProvider, VoiceClientUI } from '@leia-org/luke-client';
+import Editor, { type Monaco } from '@monaco-editor/react';
 import Login from './components/Login';
 import './App.css';
+
+interface ToolModal {
+    title: string;
+    body: string;
+}
 
 function App() {
     const [token, setToken] = useState<string | null>(null);
@@ -15,6 +21,42 @@ function App() {
     const [customTitle, setCustomTitle] = useState('Luke AI');
     const [customWidth, setCustomWidth] = useState<string>('');
     const [customHeight, setCustomHeight] = useState<string>('');
+
+    // State driven by the frontend tools
+    const [modal, setModal] = useState<ToolModal | null>(null);
+    const editorRef = useRef<{ getValue: () => string } | null>(null);
+    const [editorValue, setEditorValue] = useState<string>(
+        '// Ask Luke "read the editor" and it will call getEditorContent()\nfunction hello() {\n    return "Luke can see this code";\n}\n'
+    );
+
+    // Tool handlers that will run in the browser.
+    const tools = useMemo(() => ({
+        openModal: {
+            description: 'Opens a modal dialog in the user\'s browser with a given title and body text. Use this to show information or confirmations.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    title: { type: 'string', description: 'Modal heading' },
+                    body: { type: 'string', description: 'Body text (can be multi-line)' },
+                },
+                required: ['title', 'body'],
+            },
+            execute: async (args: Record<string, unknown>) => {
+                const title = String(args.title ?? '');
+                const body = String(args.body ?? '');
+                setModal({ title, body });
+                return { shown: true };
+            },
+        },
+        getEditorContent: {
+            description: 'Reads the current text inside the in-page Monaco code editor and returns it as a string.',
+            parameters: { type: 'object', properties: {} },
+            execute: async () => {
+                const content = editorRef.current?.getValue() ?? '';
+                return { content };
+            },
+        },
+    }), []);
 
     // Check for stored token
     useEffect(() => {
@@ -60,6 +102,7 @@ function App() {
             // Enable client-side local storage backup
             // Server-side history is automatically handled if sent by server
             persistence={true}
+            tools={tools}
         >
             <div className="demo-dashboard" style={{
                 height: '100vh',
@@ -76,6 +119,23 @@ function App() {
                             <button onClick={handleLogout} style={{ padding: '8px 16px', background: 'white', border: '1px solid #d1d5db', borderRadius: '6px', cursor: 'pointer', color: '#374151' }}>
                                 Logout
                             </button>
+                        </div>
+                    </div>
+
+                    <div style={{ background: 'white', padding: '24px', borderRadius: '12px', marginBottom: '20px', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)' }}>
+                        <h2 style={{ marginTop: 0, fontSize: '18px', color: '#1f2937', marginBottom: '12px' }}>Playground editor</h2>
+                        <p style={{ margin: '0 0 12px', fontSize: '13px', color: '#6b7280' }}>
+                            Tell Luke "read the editor and summarise it" — it will call the frontend tool <code>getEditorContent()</code>.
+                        </p>
+                        <div style={{ border: '1px solid #d1d5db', borderRadius: '6px', overflow: 'hidden' }}>
+                            <Editor
+                                height="220px"
+                                defaultLanguage="javascript"
+                                value={editorValue}
+                                onChange={(v) => setEditorValue(v ?? '')}
+                                onMount={(editor: any, _monaco: Monaco) => { editorRef.current = editor; }}
+                                options={{ minimap: { enabled: false }, fontSize: 13 }}
+                            />
                         </div>
                     </div>
 
@@ -171,6 +231,25 @@ function App() {
                         </div>
                     </div>
                 </div>
+
+                {modal && (
+                    <div style={{
+                        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2000,
+                    }} onClick={() => setModal(null)}>
+                        <div onClick={(e) => e.stopPropagation()} style={{
+                            background: 'white', borderRadius: '12px', padding: '24px',
+                            maxWidth: '500px', width: '90%', boxShadow: '0 20px 40px rgba(0,0,0,0.2)',
+                        }}>
+                            <h2 style={{ marginTop: 0, fontSize: '20px', color: '#1f2937' }}>{modal.title}</h2>
+                            <p style={{ color: '#374151', whiteSpace: 'pre-wrap' }}>{modal.body}</p>
+                            <button onClick={() => setModal(null)} style={{
+                                padding: '10px 20px', background: '#2563eb', color: 'white',
+                                border: 'none', borderRadius: '6px', cursor: 'pointer',
+                            }}>Close</button>
+                        </div>
+                    </div>
+                )}
 
                 {showClient && (
                     <VoiceClientUI

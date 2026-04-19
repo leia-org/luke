@@ -203,6 +203,30 @@ export function useLuke(config: UseLukeConfig): UseLukeReturn {
                     }
                     break;
 
+                case 'tool_call': {
+                    const tool = config.tools?.[message.name];
+                    const sendResult = (payload: { result?: unknown; error?: string }) => {
+                        if (wsRef.current?.readyState === WebSocket.OPEN) {
+                            wsRef.current.send(JSON.stringify({
+                                type: 'tool_result',
+                                callId: message.callId,
+                                ...payload,
+                            }));
+                        }
+                    };
+                    if (!tool) {
+                        sendResult({ error: `No frontend tool named '${message.name}'` });
+                        break;
+                    }
+                    Promise.resolve()
+                        .then(() => tool.execute(message.arguments))
+                        .then((result) => sendResult({ result }))
+                        .catch((err: unknown) => sendResult({
+                            error: err instanceof Error ? err.message : String(err),
+                        }));
+                    break;
+                }
+
                 case 'error':
                     const err = new Error(`${message.code}: ${message.message}`);
                     setError(err);
@@ -245,6 +269,19 @@ export function useLuke(config: UseLukeConfig): UseLukeReturn {
             if (reconnectTimeout.current) {
                 clearTimeout(reconnectTimeout.current);
                 reconnectTimeout.current = undefined;
+            }
+            // Register frontend tools before the server processes
+            // select_provider so their schemas are declared to the LLM.
+            const toolEntries = Object.entries(config.tools ?? {});
+            if (toolEntries.length > 0) {
+                ws.send(JSON.stringify({
+                    type: 'register_tools',
+                    tools: toolEntries.map(([name, t]) => ({
+                        name,
+                        description: t.description,
+                        parameters: t.parameters,
+                    })),
+                }));
             }
         };
 
@@ -523,6 +560,18 @@ export function useLuke(config: UseLukeConfig): UseLukeReturn {
         workletModuleLoadedRef.current = false;
     }, [stopRecording, stopPlayback]);
 
+    // Reload: disconnect and reconnect. Used when tools/widgets change
+    // and we need the new set to be declared to the provider at setup.
+    const reload = useCallback(() => {
+        disconnect();
+        // Give the close handler a tick so wsRef is cleared before we
+        // try to connect again.
+        setTimeout(() => {
+            isIntentionalDisconnect.current = false;
+            connect();
+        }, 50);
+    }, [disconnect, connect]);
+
     // Select provider
     const selectProvider = useCallback((providerId: string, voiceId?: string) => {
         const provider = providers.find((p) => p.id === providerId);
@@ -651,6 +700,7 @@ export function useLuke(config: UseLukeConfig): UseLukeReturn {
         isConnected: connectionState === 'connected',
         connect,
         disconnect,
+        reload,
         error,
 
         providers,

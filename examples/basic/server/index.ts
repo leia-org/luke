@@ -4,7 +4,7 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import { createLukeServer, openai, gemini, z } from '@leia-org/luke-server';
+import { createLukeServer, openai, gemini, z, defineTool } from '@leia-org/luke-server';
 
 const app = express();
 app.use(cors());
@@ -46,6 +46,15 @@ function getAvailableProviders(): string[] {
 // In production, use a real database (Postgres, MongoDB, etc.)
 const historyStore = new Map<string, any[]>();
 
+// Fake "database" backing searchDb — in a real app this would hit Postgres,
+// an ORM, a vector store, etc.
+const FAKE_DB = [
+    { id: 1, title: 'Authentication guide', tags: ['auth', 'oauth', 'jwt'] },
+    { id: 2, title: 'Rate limiting recipes', tags: ['infra', 'rate-limit'] },
+    { id: 3, title: 'Websocket scaling', tags: ['realtime', 'infra'] },
+    { id: 4, title: 'Voice UX patterns', tags: ['ui', 'voice', 'a11y'] },
+];
+
 // Create Luke server with configured providers
 const lukeServer = createLukeServer({
     providers: [
@@ -55,6 +64,29 @@ const lukeServer = createLukeServer({
         ...(process.env.GEMINI_API_KEY
             ? [gemini({ apiKey: process.env.GEMINI_API_KEY })]
             : []),
+    ],
+
+    // Backend tools — run on the server. Declared with zod; the server
+    // converts them to JSON Schema for the LLM and executes .execute()
+    // when the model calls them.
+    tools: [
+        defineTool({
+            name: 'searchDb',
+            description: 'Searches the knowledge base for entries matching a query string. Returns up to `limit` items with id and title.',
+            parameters: z.object({
+                query: z.string().describe('Free-text search query'),
+                limit: z.number().int().min(1).max(20).optional().describe('Maximum number of results (default 5)'),
+            }),
+            execute: async ({ query, limit }) => {
+                const q = query.toLowerCase();
+                const hits = FAKE_DB
+                    .filter((row) => row.title.toLowerCase().includes(q) || row.tags.some((t) => t.includes(q)))
+                    .slice(0, limit ?? 5)
+                    .map(({ id, title }) => ({ id, title }));
+                console.log(`[tool:searchDb] query="${query}" hits=${hits.length}`);
+                return { hits };
+            },
+        }),
     ],
 
     auth: {
@@ -110,7 +142,14 @@ const lukeServer = createLukeServer({
             // Return per-session system instruction
             // In production, load from database based on session/user context
             return `You are Luke, a friendly AI voice assistant.
-Keep your responses concise and conversational.`;
+Keep your responses concise and conversational.
+
+You have access to these tools:
+- searchDb(query, limit?): search the knowledge base.
+- openModal(title, body): show a modal dialog in the user's browser.
+- getEditorContent(): read the current content of the Monaco editor on the page.
+
+Use the tools whenever they can help, and keep talking to the user while you work.`;
         },
     },
 

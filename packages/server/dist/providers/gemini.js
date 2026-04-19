@@ -33,7 +33,11 @@ async function createGeminiConnection(apiKey, model, config) {
     let onTranscriptionHandler = null;
     let onTurnCompleteHandler = null;
     let onInterruptedHandler = null;
+    let onToolCallHandler = null;
     let onErrorHandler = null;
+    // Gemini needs both id AND name in the functionResponse; remember
+    // the name by callId when a toolCall arrives.
+    const pendingCallNames = new Map();
     // Wait for connection and send setup
     await new Promise((resolve, reject) => {
         const timeout = setTimeout(() => reject(new Error('Connection timeout')), 15000);
@@ -64,6 +68,17 @@ async function createGeminiConnection(apiKey, model, config) {
             }
             if (config.transcription?.output) {
                 setup.outputAudioTranscription = {};
+            }
+            // Map tools to Gemini format. Parameters arrive already in
+            // JSON Schema form.
+            if (config.tools && config.tools.length > 0) {
+                setup.tools = [{
+                        functionDeclarations: config.tools.map((tool) => ({
+                            name: tool.name,
+                            description: tool.description,
+                            parameters: tool.parameters,
+                        })),
+                    }];
             }
             ws.send(JSON.stringify({ setup }));
         });
@@ -194,6 +209,21 @@ async function createGeminiConnection(apiKey, model, config) {
                 onInterruptedHandler?.();
             }
         }
+        // Handle function calls from the model
+        const toolCall = message.toolCall;
+        if (toolCall?.functionCalls) {
+            const functionCalls = toolCall.functionCalls;
+            for (const call of functionCalls) {
+                const name = call.name;
+                // Gemini gives us a synthetic id we must echo in the response.
+                const callId = call.id ?? name;
+                const args = call.args ?? {};
+                if (name) {
+                    pendingCallNames.set(callId, name);
+                    onToolCallHandler?.({ callId, name, arguments: args });
+                }
+            }
+        }
         // Handle Go Away (session ending soon)
         if (message.goAway) {
             onErrorHandler?.(new Error('Server requested disconnect'));
@@ -245,6 +275,9 @@ async function createGeminiConnection(apiKey, model, config) {
         onInterrupted(handler) {
             onInterruptedHandler = handler;
         },
+        onToolCall(handler) {
+            onToolCallHandler = handler;
+        },
         onError(handler) {
             onErrorHandler = handler;
         },
@@ -257,6 +290,26 @@ async function createGeminiConnection(apiKey, model, config) {
                     },
                 }));
             }
+        },
+        sendToolResult(callId, result) {
+            if (ws.readyState !== WebSocket.OPEN)
+                return;
+            const name = pendingCallNames.get(callId) ?? callId;
+            pendingCallNames.delete(callId);
+            // Gemini expects functionResponses with the same id and a
+            // response object wrapping the payload.
+            const payload = (result && typeof result === 'object' && !Array.isArray(result))
+                ? result
+                : { result };
+            ws.send(JSON.stringify({
+                toolResponse: {
+                    functionResponses: [{
+                            id: callId,
+                            name,
+                            response: payload,
+                        }],
+                },
+            }));
         },
         async disconnect() {
             if (ws.readyState === WebSocket.OPEN) {

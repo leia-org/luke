@@ -2,7 +2,28 @@
 // Main server that handles client connections, authentication, and provider routing
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
+import { zodToJsonSchema } from 'zod-to-json-schema';
 import { authenticate } from './auth.js';
+// Timeout (ms) for a frontend tool call to return a result before we
+// reply to the provider with an error.
+const FRONTEND_TOOL_TIMEOUT_MS = 10000;
+// Strip JSON-Schema meta fields that Gemini Live rejects (it closes
+// the socket with 1007 otherwise). $schema and additionalProperties
+// are the usual offenders emitted by zod-to-json-schema.
+function sanitizeJsonSchema(node) {
+    if (Array.isArray(node))
+        return node.map(sanitizeJsonSchema);
+    if (node && typeof node === 'object') {
+        const out = {};
+        for (const [k, v] of Object.entries(node)) {
+            if (k === '$schema' || k === 'additionalProperties' || k === '$ref' || k === 'definitions')
+                continue;
+            out[k] = sanitizeJsonSchema(v);
+        }
+        return out;
+    }
+    return node;
+}
 // Generates a unique session ID
 function generateSessionId() {
     return `luke_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
@@ -21,6 +42,12 @@ export function createLukeServer(config) {
     // Per-connection audio input sample rate advertised by the client via
     // the `client_audio_format` message. Defaults to 48000 if never sent.
     const clientSampleRates = new Map();
+    // Frontend tool schemas registered by each client (before select_provider).
+    const frontendSchemas = new Map();
+    // Dispatch map: tool name → how to execute it.
+    const toolRegistry = new Map();
+    // Pending frontend tool calls awaiting a tool_result from the client.
+    const pendingFrontendCalls = new Map();
     // Linear-interpolation resample of a PCM16 LE mono buffer.
     function resamplePcm16(input, fromRate, toRate) {
         if (fromRate === toRate)
@@ -179,6 +206,27 @@ export function createLukeServer(config) {
                     }
                 }
                 break;
+            case 'register_tools':
+                // Store schemas for the upcoming select_provider. The
+                // client must send this before select_provider for the
+                // tools to be declared to the LLM.
+                frontendSchemas.set(ws, message.tools ?? []);
+                console.log(`[luke] register_tools: ${(message.tools ?? []).map((t) => t.name).join(', ')}`);
+                break;
+            case 'tool_result': {
+                const pending = pendingFrontendCalls.get(ws)?.get(message.callId);
+                if (!pending)
+                    break;
+                pendingFrontendCalls.get(ws)?.delete(message.callId);
+                clearTimeout(pending.timer);
+                if (message.error) {
+                    pending.reject(new Error(message.error));
+                }
+                else {
+                    pending.resolve(message.result);
+                }
+                break;
+            }
         }
     }
     // Connect to selected provider
@@ -222,12 +270,36 @@ export function createLukeServer(config) {
             if (localHistory.length === 0 && persistedHistory.length > 0) {
                 conversationHistory.set(ws, [...persistedHistory]);
             }
+            // Build unified tool declarations (backend + frontend)
+            // and a per-session dispatch registry.
+            const backendTools = config.tools ?? [];
+            const frontendTools = frontendSchemas.get(ws) ?? [];
+            const declarations = [
+                ...backendTools.map((t) => ({
+                    name: t.name,
+                    description: t.description,
+                    parameters: sanitizeJsonSchema(zodToJsonSchema(t.parameters, { target: 'openAi' })),
+                })),
+                ...frontendTools.map((t) => ({
+                    name: t.name,
+                    description: t.description,
+                    parameters: sanitizeJsonSchema(t.parameters),
+                })),
+            ];
+            const registry = new Map();
+            for (const t of backendTools)
+                registry.set(t.name, { kind: 'backend', def: t });
+            for (const t of frontendTools)
+                registry.set(t.name, { kind: 'frontend' });
+            toolRegistry.set(ws, registry);
+            pendingFrontendCalls.set(ws, new Map());
+            console.log(`[luke] provider.connect provider=${providerId} voice=${voiceId ?? '(default)'} declarations=${declarations.map((d) => d.name).join(', ') || '(none)'}`);
             const connection = await provider.connect({
                 voice: voiceId ?? provider.voices[0]?.id,
                 systemInstruction,
                 history: conversationHistory.get(ws) || [],
                 transcription: config.config?.transcription,
-                tools: config.config?.tools,
+                tools: declarations.length > 0 ? declarations : undefined,
             });
             session.providerId = providerId;
             session.providerConnection = connection;
@@ -294,6 +366,58 @@ export function createLukeServer(config) {
                 ws.send(JSON.stringify({ type: 'interrupted' }));
             }
         });
+        connection.onToolCall(async (call) => {
+            console.log(`[luke] tool_call: name=${call.name} callId=${call.callId} args=${JSON.stringify(call.arguments)}`);
+            const registry = toolRegistry.get(ws);
+            const entry = registry?.get(call.name);
+            if (!entry) {
+                const known = Array.from(registry?.keys() ?? []);
+                console.warn(`[luke] unknown tool ${call.name}; registered=${JSON.stringify(known)}`);
+                connection.sendToolResult(call.callId, { error: `Unknown tool: ${call.name}` });
+                return;
+            }
+            try {
+                if (entry.kind === 'backend') {
+                    // Validate args with the tool's zod schema (throws on mismatch)
+                    const parsed = entry.def.parameters.parse(call.arguments);
+                    const result = await entry.def.execute(parsed);
+                    console.log(`[luke] backend result ${call.name}: ${JSON.stringify(result).slice(0, 200)}`);
+                    connection.sendToolResult(call.callId, result);
+                }
+                else {
+                    // Frontend tool: forward to client and wait for result.
+                    const result = await new Promise((resolve, reject) => {
+                        const pendings = pendingFrontendCalls.get(ws);
+                        if (!pendings) {
+                            reject(new Error('Session not ready for tool calls'));
+                            return;
+                        }
+                        const timer = setTimeout(() => {
+                            pendings.delete(call.callId);
+                            reject(new Error(`Frontend tool '${call.name}' timed out after ${FRONTEND_TOOL_TIMEOUT_MS}ms`));
+                        }, FRONTEND_TOOL_TIMEOUT_MS);
+                        pendings.set(call.callId, { resolve, reject, timer });
+                        if (ws.readyState === WebSocket.OPEN) {
+                            const msg = {
+                                type: 'tool_call',
+                                callId: call.callId,
+                                name: call.name,
+                                arguments: call.arguments,
+                            };
+                            ws.send(JSON.stringify(msg));
+                            console.log(`[luke] forwarded tool_call to client: ${call.name}`);
+                        }
+                    });
+                    console.log(`[luke] frontend result ${call.name}: ${JSON.stringify(result).slice(0, 200)}`);
+                    connection.sendToolResult(call.callId, result);
+                }
+            }
+            catch (err) {
+                const message = err instanceof Error ? err.message : String(err);
+                console.error(`[luke] tool ${call.name} failed: ${message}`);
+                connection.sendToolResult(call.callId, { error: message });
+            }
+        });
         connection.onError((error) => {
             // Only send error if this connection is still the active one
             // (prevents errors when switching providers)
@@ -311,10 +435,21 @@ export function createLukeServer(config) {
             await config.session.onEnd(session.userSession, reason);
         }
         config.onDisconnect?.(session, user);
+        // Reject any pending frontend tool calls for this connection
+        const pendings = pendingFrontendCalls.get(ws);
+        if (pendings) {
+            for (const p of pendings.values()) {
+                clearTimeout(p.timer);
+                p.reject(new Error('Client disconnected'));
+            }
+        }
         sessions.delete(ws);
         users.delete(ws);
         conversationHistory.delete(ws);
         clientSampleRates.delete(ws);
+        frontendSchemas.delete(ws);
+        toolRegistry.delete(ws);
+        pendingFrontendCalls.delete(ws);
     }
     // Send error message to client
     function sendError(ws, code, message) {
