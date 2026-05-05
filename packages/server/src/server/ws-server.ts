@@ -270,7 +270,6 @@ export function createLukeServer<TUser, TSession>(
                 // client must send this before select_provider for the
                 // tools to be declared to the LLM.
                 frontendSchemas.set(ws, message.tools ?? []);
-                console.log(`[luke] register_tools: ${(message.tools ?? []).map((t) => t.name).join(', ')}`);
                 break;
 
             case 'tool_result': {
@@ -362,7 +361,6 @@ export function createLukeServer<TUser, TSession>(
             for (const t of frontendTools) registry.set(t.name, { kind: 'frontend' });
             toolRegistry.set(ws, registry);
             pendingFrontendCalls.set(ws, new Map());
-            console.log(`[luke] provider.connect provider=${providerId} voice=${voiceId ?? '(default)'} declarations=${declarations.map((d) => d.name).join(', ') || '(none)'}`);
 
             const connection = await provider.connect({
                 voice: voiceId ?? provider.voices[0]?.id,
@@ -453,12 +451,9 @@ export function createLukeServer<TUser, TSession>(
         });
 
         connection.onToolCall(async (call) => {
-            console.log(`[luke] tool_call: name=${call.name} callId=${call.callId} args=${JSON.stringify(call.arguments)}`);
             const registry = toolRegistry.get(ws);
             const entry = registry?.get(call.name);
             if (!entry) {
-                const known = Array.from(registry?.keys() ?? []);
-                console.warn(`[luke] unknown tool ${call.name}; registered=${JSON.stringify(known)}`);
                 connection.sendToolResult(call.callId, { error: `Unknown tool: ${call.name}` });
                 return;
             }
@@ -467,7 +462,6 @@ export function createLukeServer<TUser, TSession>(
                     // Validate args with the tool's zod schema (throws on mismatch)
                     const parsed = entry.def.parameters.parse(call.arguments);
                     const result = await entry.def.execute(parsed);
-                    console.log(`[luke] backend result ${call.name}: ${JSON.stringify(result).slice(0, 200)}`);
                     connection.sendToolResult(call.callId, result);
                 } else {
                     // Frontend tool: forward to client and wait for result.
@@ -490,15 +484,12 @@ export function createLukeServer<TUser, TSession>(
                                 arguments: call.arguments,
                             };
                             ws.send(JSON.stringify(msg));
-                            console.log(`[luke] forwarded tool_call to client: ${call.name}`);
                         }
                     });
-                    console.log(`[luke] frontend result ${call.name}: ${JSON.stringify(result).slice(0, 200)}`);
                     connection.sendToolResult(call.callId, result);
                 }
             } catch (err) {
                 const message = err instanceof Error ? err.message : String(err);
-                console.error(`[luke] tool ${call.name} failed: ${message}`);
                 connection.sendToolResult(call.callId, { error: message });
             }
         });

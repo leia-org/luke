@@ -1,6 +1,6 @@
 {
     "name": "@leia-org/luke-server",
-    "version": "0.2.0-local",
+    "version": "0.2.0",
     "publishConfig": {
         "access": "public"
     },
