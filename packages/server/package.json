@@ -1,6 +1,6 @@
 {
     "name": "@leia-org/luke-server",
-    "version": "0.1.4",
+    "version": "0.2.0",
     "publishConfig": {
         "access": "public"
     },
@@ -23,7 +23,8 @@
     "dependencies": {
         "jsonwebtoken": "^9.0.2",
         "ws": "^8.18.0",
-        "zod": "^3.24.1"
+        "zod": "^3.24.1",
+        "zod-to-json-schema": "^3.25.2"
     },
     "devDependencies": {
         "@types/jsonwebtoken": "^9.0.7",
@@ -32,7 +33,6 @@
         "typescript": "^5.7.2",
         "vitest": "^2.1.8"
     },
-    "peerDependencies": {},
     "files": [
         "dist"
     ],

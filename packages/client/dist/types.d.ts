@@ -15,6 +15,11 @@ export interface TranscriptionMessage {
     timestamp: number;
 }
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'error';
+export interface FrontendTool {
+    description: string;
+    parameters: Record<string, unknown>;
+    execute: (args: Record<string, unknown>) => Promise<unknown> | unknown;
+}
 export interface UseLukeConfig {
     serverUrl: string;
     authToken?: string;
@@ -28,12 +33,16 @@ export interface UseLukeConfig {
     maxReconnectAttempts?: number;
     persistence?: boolean;
     persistenceKey?: string;
+    tools?: Record<string, FrontendTool>;
 }
 export interface UseLukeReturn {
     connectionState: ConnectionState;
     isConnected: boolean;
     connect: () => void;
     disconnect: () => void;
+    /** Disconnects and reconnects. Use after changing `tools` so the new
+     *  set is declared to the provider at session setup. */
+    reload: () => void;
     error: Error | null;
     providers: ProviderInfo[];
     selectedProvider: ProviderInfo | null;
@@ -58,6 +67,7 @@ export interface LukeProviderProps {
     autoConnect?: boolean;
     persistence?: boolean;
     persistenceKey?: string;
+    tools?: Record<string, FrontendTool>;
     children: React.ReactNode;
 }
 export type ServerMessage = {
@@ -81,6 +91,11 @@ export type ServerMessage = {
 } | {
     type: 'interrupted';
 } | {
+    type: 'tool_call';
+    callId: string;
+    name: string;
+    arguments: Record<string, unknown>;
+} | {
     type: 'error';
     code: string;
     message: string;
@@ -97,5 +112,17 @@ export type ClientMessage = {
 } | {
     type: 'reconnect';
     sessionId: string;
+} | {
+    type: 'register_tools';
+    tools: Array<{
+        name: string;
+        description: string;
+        parameters: Record<string, unknown>;
+    }>;
+} | {
+    type: 'tool_result';
+    callId: string;
+    result?: unknown;
+    error?: string;
 };
 //# sourceMappingURL=types.d.ts.map

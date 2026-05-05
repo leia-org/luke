@@ -19,6 +19,7 @@ export type {
     VoiceInfo,
     TranscriptionMessage,
     ConnectionState,
+    FrontendTool,
 } from './types.js';
 export type { AudioControlsProps } from './components/AudioControls.js';
 export type { TranscriptionDisplayProps } from './components/TranscriptionDisplay.js';

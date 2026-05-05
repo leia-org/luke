@@ -25,6 +25,16 @@ export interface TranscriptionMessage {
 // Connection state
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'error';
 
+// A tool that runs on the client. The handler receives parsed JSON
+// arguments from the model and returns any JSON-serializable value
+// (or throws to signal an error).
+export interface FrontendTool {
+    description: string;
+    // JSON Schema object describing the parameters the model should fill.
+    parameters: Record<string, unknown>;
+    execute: (args: Record<string, unknown>) => Promise<unknown> | unknown;
+}
+
 // Configuration for useLuke hook
 export interface UseLukeConfig {
     serverUrl: string;
@@ -39,6 +49,9 @@ export interface UseLukeConfig {
     maxReconnectAttempts?: number;
     persistence?: boolean;
     persistenceKey?: string;
+    // Frontend tool functions keyed by name. Declared to the LLM on
+    // connect; invoked when the model emits a matching tool call.
+    tools?: Record<string, FrontendTool>;
 }
 
 // Return type of useLuke hook
@@ -48,6 +61,9 @@ export interface UseLukeReturn {
     isConnected: boolean;
     connect: () => void;
     disconnect: () => void;
+    /** Disconnects and reconnects. Use after changing `tools` so the new
+     *  set is declared to the provider at session setup. */
+    reload: () => void;
     error: Error | null;
 
     // Provider selection
@@ -84,6 +100,7 @@ export interface LukeProviderProps {
     autoConnect?: boolean;
     persistence?: boolean;
     persistenceKey?: string;
+    tools?: Record<string, FrontendTool>;
     children: React.ReactNode;
 }
 
@@ -95,6 +112,7 @@ export type ServerMessage =
     | { type: 'transcription'; role: 'user' | 'assistant'; text: string; final: boolean }
     | { type: 'turn_complete' }
     | { type: 'interrupted' }
+    | { type: 'tool_call'; callId: string; name: string; arguments: Record<string, unknown> }
     | { type: 'error'; code: string; message: string };
 
 // Messages to server
@@ -102,4 +120,6 @@ export type ClientMessage =
     | { type: 'select_provider'; providerId: string; voiceId?: string }
     | { type: 'text'; content: string }
     | { type: 'interrupt' }
-    | { type: 'reconnect'; sessionId: string };
+    | { type: 'reconnect'; sessionId: string }
+    | { type: 'register_tools'; tools: Array<{ name: string; description: string; parameters: Record<string, unknown> }> }
+    | { type: 'tool_result'; callId: string; result?: unknown; error?: string };

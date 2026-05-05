@@ -15,6 +15,7 @@ export function LukeProvider({
     autoConnect = false,
     persistence,
     persistenceKey,
+    tools,
     children,
 }: LukeProviderProps): React.ReactElement {
     const luke = useLuke({
@@ -23,6 +24,7 @@ export function LukeProvider({
         autoConnect,
         persistence,
         persistenceKey,
+        tools,
     });
 
     return (

@@ -23,13 +23,22 @@ export interface LukeProvider {
     connect(config: ProviderSessionConfig): Promise<ProviderConnection>;
 }
 
+// A tool declaration as sent to the provider. Parameters are already in
+// JSON Schema form (converted from zod for backend tools, passed as-is
+// for frontend tools). The provider does not care where the tool runs.
+export interface ProviderToolDeclaration {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+}
+
 // Configuration passed when creating a provider session
 export interface ProviderSessionConfig {
     model?: string;
     voice?: string;
     systemInstruction?: string;
     history?: Transcription[];
-    tools?: ToolDefinition[];
+    tools?: ProviderToolDeclaration[];
     transcription?: {
         input?: boolean;
         output?: boolean;
@@ -37,14 +46,25 @@ export interface ProviderSessionConfig {
 }
 
 // Active connection to a provider (OpenAI/Gemini WebSocket)
+// A function-call emitted by the provider. callId is provider-specific
+// and must be echoed back via sendToolResult.
+export interface ToolCall {
+    callId: string;
+    name: string;
+    arguments: Record<string, unknown>;
+}
+
 export interface ProviderConnection {
     send(message: ProviderMessage): void;
     onAudio(handler: (audio: Uint8Array) => void): void;
     onTranscription(handler: (transcription: Transcription) => void): void;
     onTurnComplete(handler: () => void): void;
     onInterrupted(handler: () => void): void;
+    onToolCall(handler: (call: ToolCall) => void): void;
     onError(handler: (error: Error) => void): void;
     interrupt(): void;
+    endOfTurn?(): void;
+    sendToolResult(callId: string, result: unknown): void;
     disconnect(): Promise<void>;
 }
 
@@ -66,6 +86,16 @@ export interface ToolDefinition<T = unknown> {
     description: string;
     parameters: z.ZodType<T>;
     execute: (params: T) => Promise<unknown>;
+}
+
+// JSON-schema version of a tool, used for tools whose execution lives
+// on the client (the client declares these via register_tools). The
+// server never executes them; it only forwards calls.
+export interface FrontendToolSchema {
+    name: string;
+    description: string;
+    // JSON Schema object for the function's parameters
+    parameters: Record<string, unknown>;
 }
 
 // JWT configuration for auth
@@ -97,7 +127,9 @@ export interface LukeServerConfig<TUser = unknown, TSession = unknown> {
     providers: LukeProvider[];
     auth: AuthConfig<TUser>;
     session?: SessionConfig<TSession, TUser>;
-    config?: Partial<Omit<ProviderSessionConfig, 'systemInstruction'>>;
+    // Backend tools executed on the server. Declared with zod + execute.
+    tools?: ToolDefinition[];
+    config?: Partial<Omit<ProviderSessionConfig, 'systemInstruction' | 'tools'>>;
     onConnect?: (session: LukeSession<TSession>, user: TUser) => void;
     onDisconnect?: (session: LukeSession<TSession>, user: TUser) => void;
     onTranscription?: (transcription: Transcription, session: LukeSession<TSession>) => void;
@@ -131,7 +163,9 @@ export type ClientMessage =
     | { type: 'text'; content: string }
     | { type: 'interrupt' }
     | { type: 'reconnect'; sessionId: string }
-    | { type: 'client_audio_format'; sampleRate: number };
+    | { type: 'client_audio_format'; sampleRate: number }
+    | { type: 'register_tools'; tools: FrontendToolSchema[] }
+    | { type: 'tool_result'; callId: string; result?: unknown; error?: string };
 
 // Messages from server to client
 export type ServerMessage =
@@ -142,4 +176,5 @@ export type ServerMessage =
     | { type: 'transcription'; role: 'user' | 'assistant'; text: string; final: boolean }
     | { type: 'turn_complete' }
     | { type: 'interrupted' }
+    | { type: 'tool_call'; callId: string; name: string; arguments: Record<string, unknown> }
     | { type: 'error'; code: string; message: string };

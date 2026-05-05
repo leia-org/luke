@@ -35,3 +35,16 @@ export type {
 
 // Re-export zod for tool parameter definitions
 export { z } from 'zod';
+import type { z as zType } from 'zod';
+import type { ToolDefinition } from './types.js';
+
+// Helper that infers the execute signature from the zod schema so users
+// get type-safe tool authoring without repeating the parameter shape.
+export function defineTool<T extends zType.ZodType>(tool: {
+    name: string;
+    description: string;
+    parameters: T;
+    execute: (params: zType.infer<T>) => Promise<unknown> | unknown;
+}): ToolDefinition {
+    return tool as unknown as ToolDefinition;
+}

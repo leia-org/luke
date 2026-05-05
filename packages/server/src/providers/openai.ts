@@ -8,6 +8,7 @@ import type {
     ProviderSessionConfig,
     ProviderMessage,
     Transcription,
+    ToolCall,
     VoiceConfig,
 } from '../types.js';
 
@@ -62,7 +63,12 @@ async function createOpenAIConnection(
     let onTranscriptionHandler: ((t: Transcription) => void) | null = null;
     let onTurnCompleteHandler: (() => void) | null = null;
     let onInterruptedHandler: (() => void) | null = null;
+    let onToolCallHandler: ((call: ToolCall) => void) | null = null;
     let onErrorHandler: ((error: Error) => void) | null = null;
+
+    // In-flight function calls. OpenAI streams arguments as deltas so we
+    // accumulate them by call_id until we see response.function_call_arguments.done.
+    const pendingCalls = new Map<string, { name: string; args: string }>();
 
     // Tracks whether OpenAI currently has an in-flight response so we
     // don't send response.cancel when there's nothing to cancel. If we do,
@@ -90,7 +96,8 @@ async function createOpenAIConnection(
                 sessionConfig.input_audio_transcription = { model: 'whisper-1' };
             }
 
-            // Map tools to OpenAI format
+            // Map tools to OpenAI format. Parameters arrive already in
+            // JSON Schema form (ws-server pre-converted from zod).
             if (config.tools && config.tools.length > 0) {
                 sessionConfig.tools = config.tools.map((tool) => ({
                     type: 'function',
@@ -199,6 +206,44 @@ async function createOpenAIConnection(
                 break;
             }
 
+            case 'response.output_item.added': {
+                // Track a new function_call item so we know its name/call_id
+                // when the arguments stream in.
+                const item = message.item as Record<string, unknown> | undefined;
+                if (item?.type === 'function_call') {
+                    const callId = item.call_id as string;
+                    const name = item.name as string;
+                    if (callId && name) {
+                        pendingCalls.set(callId, { name, args: '' });
+                    }
+                }
+                break;
+            }
+
+            case 'response.function_call_arguments.delta': {
+                const callId = message.call_id as string;
+                const delta = message.delta as string;
+                const entry = pendingCalls.get(callId);
+                if (entry) entry.args += delta ?? '';
+                break;
+            }
+
+            case 'response.function_call_arguments.done': {
+                const callId = message.call_id as string;
+                const entry = pendingCalls.get(callId);
+                if (!entry) break;
+                pendingCalls.delete(callId);
+                let parsed: Record<string, unknown> = {};
+                try {
+                    parsed = entry.args ? JSON.parse(entry.args) : {};
+                } catch (err) {
+                    onErrorHandler?.(new Error(`Failed to parse function args for ${entry.name}: ${err instanceof Error ? err.message : err}`));
+                    break;
+                }
+                onToolCallHandler?.({ callId, name: entry.name, arguments: parsed });
+                break;
+            }
+
             case 'error': {
                 const errorMsg = String((message.error as Record<string, unknown>)?.message || 'Unknown error');
                 // Swallow the benign cancel-when-idle race: OpenAI returns
@@ -259,6 +304,10 @@ async function createOpenAIConnection(
             onInterruptedHandler = handler;
         },
 
+        onToolCall(handler) {
+            onToolCallHandler = handler;
+        },
+
         onError(handler) {
             onErrorHandler = handler;
         },
@@ -268,6 +317,19 @@ async function createOpenAIConnection(
             if (!responseActive) return;
             responseActive = false;
             ws.send(JSON.stringify({ type: 'response.cancel' }));
+        },
+
+        sendToolResult(callId: string, result: unknown) {
+            if (ws.readyState !== WebSocket.OPEN) return;
+            ws.send(JSON.stringify({
+                type: 'conversation.item.create',
+                item: {
+                    type: 'function_call_output',
+                    call_id: callId,
+                    output: typeof result === 'string' ? result : JSON.stringify(result ?? null),
+                },
+            }));
+            ws.send(JSON.stringify({ type: 'response.create' }));
         },
 
         async disconnect() {

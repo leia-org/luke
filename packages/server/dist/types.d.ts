@@ -13,16 +13,26 @@ export interface LukeProvider {
     readonly voices: VoiceConfig[];
     connect(config: ProviderSessionConfig): Promise<ProviderConnection>;
 }
+export interface ProviderToolDeclaration {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+}
 export interface ProviderSessionConfig {
     model?: string;
     voice?: string;
     systemInstruction?: string;
     history?: Transcription[];
-    tools?: ToolDefinition[];
+    tools?: ProviderToolDeclaration[];
     transcription?: {
         input?: boolean;
         output?: boolean;
     };
+}
+export interface ToolCall {
+    callId: string;
+    name: string;
+    arguments: Record<string, unknown>;
 }
 export interface ProviderConnection {
     send(message: ProviderMessage): void;
@@ -30,8 +40,11 @@ export interface ProviderConnection {
     onTranscription(handler: (transcription: Transcription) => void): void;
     onTurnComplete(handler: () => void): void;
     onInterrupted(handler: () => void): void;
+    onToolCall(handler: (call: ToolCall) => void): void;
     onError(handler: (error: Error) => void): void;
     interrupt(): void;
+    endOfTurn?(): void;
+    sendToolResult(callId: string, result: unknown): void;
     disconnect(): Promise<void>;
 }
 export type ProviderMessage = {
@@ -51,6 +64,11 @@ export interface ToolDefinition<T = unknown> {
     description: string;
     parameters: z.ZodType<T>;
     execute: (params: T) => Promise<unknown>;
+}
+export interface FrontendToolSchema {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
 }
 export interface JwtConfig {
     secret: string;
@@ -74,7 +92,8 @@ export interface LukeServerConfig<TUser = unknown, TSession = unknown> {
     providers: LukeProvider[];
     auth: AuthConfig<TUser>;
     session?: SessionConfig<TSession, TUser>;
-    config?: Partial<Omit<ProviderSessionConfig, 'systemInstruction'>>;
+    tools?: ToolDefinition[];
+    config?: Partial<Omit<ProviderSessionConfig, 'systemInstruction' | 'tools'>>;
     onConnect?: (session: LukeSession<TSession>, user: TUser) => void;
     onDisconnect?: (session: LukeSession<TSession>, user: TUser) => void;
     onTranscription?: (transcription: Transcription, session: LukeSession<TSession>) => void;
@@ -114,6 +133,14 @@ export type ClientMessage = {
 } | {
     type: 'client_audio_format';
     sampleRate: number;
+} | {
+    type: 'register_tools';
+    tools: FrontendToolSchema[];
+} | {
+    type: 'tool_result';
+    callId: string;
+    result?: unknown;
+    error?: string;
 };
 export type ServerMessage = HandshakeMessage | {
     type: 'session_ready';
@@ -134,6 +161,11 @@ export type ServerMessage = HandshakeMessage | {
     type: 'turn_complete';
 } | {
     type: 'interrupted';
+} | {
+    type: 'tool_call';
+    callId: string;
+    name: string;
+    arguments: Record<string, unknown>;
 } | {
     type: 'error';
     code: string;
